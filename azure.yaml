@@ -1,0 +1,10 @@
+name: mcp-azure-storage
+metadata:
+  template: mcp-azure-storage
+services:
+  mcp-server:
+    project: .
+    language: ts
+    host: containerapp
+    docker:
+      path: ./Dockerfile
