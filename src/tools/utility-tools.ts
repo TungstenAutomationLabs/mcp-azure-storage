@@ -207,6 +207,39 @@ export function registerUtilityTools(server: McpServer): void {
       };
     }
   );
+
+  // ── CONTAINER NAME SANITISER ──
+
+  server.tool(
+    "util-to-container-name",
+    "Convert arbitrary text (e.g. an email address, display name, URL) into a valid Azure Storage container name. " +
+      "Rules enforced: 3-63 chars, lowercase alphanumeric + hyphens only, no leading/trailing/consecutive hyphens.",
+    {
+      input: z
+        .string()
+        .describe("The raw string to convert (e.g. 'Tom.Coppock@example.com')"),
+      prefix: z
+        .string()
+        .optional()
+        .describe("Optional prefix to prepend (e.g. 'user-' → 'user-tomcoppock')"),
+      maxLength: z
+        .number()
+        .optional()
+        .default(63)
+        .describe("Max length of the result (3-63, default 63)"),
+    },
+    async ({ input, prefix, maxLength }) => {
+      const name = toContainerName(input, prefix, maxLength);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ input, containerName: name }),
+          },
+        ],
+      };
+    }
+  );
 }
 
 /**
@@ -248,4 +281,61 @@ function determineContentType(filename: string): string {
     zip: "application/zip",
   };
   return mimeTypes[extension] || "application/octet-stream";
+}
+
+/**
+ * Convert arbitrary text into a valid Azure Storage container name.
+ *
+ * Azure container name rules:
+ *  - 3–63 characters
+ *  - Lowercase letters, digits, and hyphens only
+ *  - Must start and end with a letter or digit
+ *  - No consecutive hyphens
+ *
+ * Strategy:
+ *  1. Lowercase the input
+ *  2. Replace @ and . and _ with hyphens (common in emails/domains)
+ *  3. Strip all remaining non-alphanumeric/non-hyphen characters
+ *  4. Collapse consecutive hyphens to a single hyphen
+ *  5. Trim leading/trailing hyphens
+ *  6. Truncate to maxLength
+ *  7. Re-trim trailing hyphens after truncation
+ *  8. If result < 3 chars, pad with trailing zeros
+ */
+function toContainerName(
+  input: string,
+  prefix?: string,
+  maxLength = 63
+): string {
+  const cap = Math.min(Math.max(maxLength, 3), 63);
+
+  let name = (prefix ?? "") + input;
+
+  // 1. Lowercase
+  name = name.toLowerCase();
+
+  // 2. Replace common separators with hyphens
+  name = name.replace(/[@._]/g, "-");
+
+  // 3. Strip invalid characters
+  name = name.replace(/[^a-z0-9-]/g, "");
+
+  // 4. Collapse consecutive hyphens
+  name = name.replace(/-{2,}/g, "-");
+
+  // 5. Trim leading/trailing hyphens
+  name = name.replace(/^-+|-+$/g, "");
+
+  // 6. Truncate
+  name = name.slice(0, cap);
+
+  // 7. Re-trim trailing hyphens after truncation
+  name = name.replace(/-+$/, "");
+
+  // 8. Pad if too short
+  while (name.length < 3) {
+    name += "0";
+  }
+
+  return name;
 }

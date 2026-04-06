@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **40 tools** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **41 tools** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and Bicep infrastructure-as-code.
 
@@ -8,7 +8,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and 
 
 ## Features
 
-- **40 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **41 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
 - **Dual-mode transport** — stateful sessions for MCP clients + stateless one-shot for HTTP testing
 - **API key authentication** with constant-time comparison (X-API-Key header or Bearer token)
 - **Rate limiting** — configurable per-IP request limits
@@ -125,7 +125,7 @@ mcp-azure-storage/
 | `table-list` | List all tables |
 | `table-create` | Create a table if it doesn't exist |
 | `table-delete` | Delete a table |
-| `table-entity-upsert` | Insert or merge an entity |
+| `table-entity-upsert` | Insert or merge an entity — pass `partitionKey`, `rowKey`, and a flat `entity` JSON object (`{"name": "Alice", "score": 95}`) |
 | `table-entity-get` | Get entity by partition key + row key |
 | `table-entity-query` | Query entities with OData filter |
 | `table-entity-delete` | Delete an entity |
@@ -144,7 +144,7 @@ mcp-azure-storage/
 | `fileshare-read-file` | Download file content as base64 |
 | `fileshare-delete-file` | Delete a file |
 
-### Utilities (5 tools)
+### Utilities (6 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -153,6 +153,7 @@ mcp-azure-storage/
 | `util-refresh-blob-sas` | Generate a fresh SAS token for a blob |
 | `util-refresh-container-sas` | Generate a fresh SAS token for a container |
 | `util-get-content-type` | MIME type lookup by file name/extension |
+| `util-to-container-name` | Convert arbitrary text (email, URL, etc.) to a valid container name |
 
 ---
 

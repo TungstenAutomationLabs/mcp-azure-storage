@@ -87,14 +87,20 @@ export function registerTableTools(server: McpServer): void {
 
   server.tool(
     "table-entity-upsert",
-    "Insert or update (merge) an entity in a table",
+    "Insert or update (merge) an entity in a table. " +
+      "Provide partitionKey and rowKey separately; additional properties go in the entity object as a flat JSON object " +
+      '(e.g. {"name": "Alice", "age": 30, "active": true}). ' +
+      "Supported value types: string, number, boolean, Date (ISO 8601 string).",
     {
       tableName: z.string().describe("Table name"),
-      partitionKey: z.string().describe("Partition key"),
-      rowKey: z.string().describe("Row key"),
+      partitionKey: z.string().describe("Partition key — groups related entities for efficient querying"),
+      rowKey: z.string().describe("Row key — unique within the partition"),
       entity: z
         .record(z.string(), z.unknown())
-        .describe("Entity properties as key-value pairs"),
+        .describe(
+          'Flat JSON object of property name→value pairs, e.g. {"email": "a@b.com", "score": 95, "verified": true}. ' +
+          "Do NOT include partitionKey or rowKey here — they are separate parameters."
+        ),
     },
     async ({ tableName, partitionKey, rowKey, entity }) => {
       const client = getTableClient(tableName);
