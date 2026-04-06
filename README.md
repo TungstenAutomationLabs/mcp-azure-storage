@@ -43,7 +43,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and 
                         ┌───────┐ ┌───────┐ ┌─────────┐ ┌─────────┐ ┌───────┐
                         │ Blob  │ │ Queue │ │  Table  │ │  File   │ │ Util  │
                         │ Tools │ │ Tools │ │  Tools  │ │  Share  │ │ Tools │
-                        │ (11)  │ │  (8)  │ │   (7)   │ │   (9)   │ │  (5)  │
+                        │ (11)  │ │  (8)  │ │   (7)   │ │   (9)   │ │  (6)  │
                         └───┬───┘ └───┬───┘ └────┬────┘ └────┬────┘ └───┬───┘
                             │         │          │           │         │
                             └─────────┴──────────┴───────────┴─────────┘
