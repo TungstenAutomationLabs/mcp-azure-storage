@@ -70,7 +70,7 @@ mcp-azure-storage/
 │       ├── queue-tools.ts     #  8 tools — queue CRUD + message operations
 │       ├── table-tools.ts     #  7 tools — table CRUD + entity operations
 │       ├── fileshare-tools.ts #  9 tools — share/directory/file operations
-│       └── utility-tools.ts   #  5 tools — base64, SAS refresh, MIME lookup
+│       └── utility-tools.ts   #  6 tools — base64, SAS refresh, MIME lookup
 ├── infra/
 │   ├── main.bicep             # Azure Container Apps + Storage + RBAC
 │   └── main.parameters.json   # azd-templated deployment parameters

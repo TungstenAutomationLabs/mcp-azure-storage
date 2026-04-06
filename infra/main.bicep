@@ -2,12 +2,12 @@ targetScope = 'resourceGroup'
 
 param location string = resourceGroup().location
 param environmentName string
-param containerImage string
+param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 
 @secure()
 param mcpApiKey string
 
-// Log Analytics (required by Container Apps Environment)
+// ── Log Analytics (required by Container Apps Environment) ────
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${environmentName}-logs'
   location: location
@@ -17,7 +17,17 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   }
 }
 
-// Container Apps Environment
+// ── Azure Container Registry ─────────────────────────────────
+resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  name: '${replace(environmentName, '-', '')}acr'
+  location: location
+  sku: { name: 'Basic' }
+  properties: {
+    adminUserEnabled: false
+  }
+}
+
+// ── Container Apps Environment ───────────────────────────────
 resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${environmentName}-env'
   location: location
@@ -32,7 +42,7 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-// Storage Account
+// ── Storage Account ──────────────────────────────────────────
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: '${replace(environmentName, '-', '')}stor'
   location: location
@@ -45,7 +55,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
-// Container App
+// ── Container App ────────────────────────────────────────────
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${environmentName}-mcp'
   location: location
@@ -61,6 +71,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         transport: 'http'
         // Automatic HTTPS + managed TLS cert on *.azurecontainerapps.io
       }
+      registries: [
+        {
+          server: containerRegistry.properties.loginServer
+          identity: 'system'
+        }
+      ]
       secrets: [
         {
           name: 'mcp-api-key'
@@ -124,7 +140,18 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
-// ── Role Assignment: Storage Blob Data Contributor ───────────
+// ── Role: AcrPull — let Container App pull images from ACR ───
+resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(containerRegistry.id, containerApp.id, '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+  scope: containerRegistry
+  properties: {
+    principalId: containerApp.identity.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// ── Role: Storage Blob Data Contributor ──────────────────────
 resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, containerApp.id, 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
   scope: storageAccount
@@ -135,7 +162,7 @@ resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01'
   }
 }
 
-// ── Role Assignment: Storage Queue Data Contributor ──────────
+// ── Role: Storage Queue Data Contributor ─────────────────────
 resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, containerApp.id, '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
   scope: storageAccount
@@ -146,7 +173,7 @@ resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
-// ── Role Assignment: Storage Table Data Contributor ──────────
+// ── Role: Storage Table Data Contributor ─────────────────────
 resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, containerApp.id, '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
   scope: storageAccount
@@ -158,5 +185,7 @@ resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
 }
 
 // ── Outputs ──────────────────────────────────────────────────
+// azd uses AZURE_CONTAINER_REGISTRY_ENDPOINT to know where to push images
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerRegistry.properties.loginServer
 output mcpEndpoint string = 'https://${containerApp.properties.configuration.ingress.fqdn}/mcp'
 output storageAccountName string = storageAccount.name
