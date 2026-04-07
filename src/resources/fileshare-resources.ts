@@ -26,6 +26,12 @@ const shareServiceClient = new ShareServiceClient(
   credential
 );
 
+/** Maximum number of items returned by listing resources to prevent oversized responses. */
+const MAX_LIST_ITEMS = 500;
+
+/** Maximum file size (in bytes) that will be downloaded via the resource interface. */
+const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MiB
+
 /**
  * Registers all File Share MCP resources on the given server instance.
  *
@@ -45,6 +51,7 @@ export function registerFileShareResources(server: McpServer): void {
       let index = 1;
       for await (const share of shareServiceClient.listShares()) {
         shares.push({ name: share.name, index: index++ });
+        if (index > MAX_LIST_ITEMS) break;
       }
       return {
         contents: [
@@ -62,18 +69,7 @@ export function registerFileShareResources(server: McpServer): void {
   server.resource(
     "fileshare-list-files",
     new ResourceTemplate("azure-fileshare:///shares/{shareName}/files/{directoryPath}", {
-      list: async () => {
-        // List root directories of each share
-        const resources: { uri: string; name: string; mimeType: string }[] = [];
-        for await (const share of shareServiceClient.listShares()) {
-          resources.push({
-            uri: `azure-fileshare:///shares/${encodeURIComponent(share.name)}/files/`,
-            name: `Files in ${share.name} (root)`,
-            mimeType: "application/json",
-          });
-        }
-        return { resources };
-      },
+      list: undefined, // Discover share names via the azure-fileshare:///shares static resource
     }),
     {
       description: "List files and directories within a specific directory of a file share. Use this to browse the hierarchical folder structure — set directoryPath to empty string for the root directory. Returns a JSON array of objects with 'name', 'type' ('file' or 'directory'), 'size' (bytes, files only), and 'index' (1-based). Navigate into subdirectories by using a returned directory name as the next directoryPath.",
@@ -98,6 +94,7 @@ export function registerFileShareResources(server: McpServer): void {
             index: index++,
           });
         }
+        if (index > MAX_LIST_ITEMS) break;
       }
       return {
         contents: [
@@ -130,6 +127,14 @@ export function registerFileShareResources(server: McpServer): void {
       const dirClient = shareClient.getDirectoryClient(directoryPath);
       const fileClient = dirClient.getFileClient(fileName);
 
+      // Check file size before downloading to prevent OOM on large files
+      const props = await fileClient.getProperties();
+      const size = props.contentLength ?? 0;
+      if (size > MAX_DOWNLOAD_BYTES) {
+        throw new Error(
+          `File '${fileName}' is ${(size / 1024 / 1024).toFixed(1)} MiB which exceeds the ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MiB resource download limit. Use the fileshare-read-file tool for larger files.`
+        );
+      }
       const downloadResponse = await fileClient.download(0);
       const body = downloadResponse.readableStreamBody;
       if (!body) {

@@ -24,6 +24,9 @@ const queueServiceClient = new QueueServiceClient(
   credential
 );
 
+/** Maximum number of items returned by listing resources to prevent oversized responses. */
+const MAX_LIST_ITEMS = 500;
+
 /**
  * Registers all Queue Storage MCP resources on the given server instance.
  *
@@ -43,6 +46,7 @@ export function registerQueueResources(server: McpServer): void {
       let index = 1;
       for await (const queue of queueServiceClient.listQueues()) {
         queues.push({ name: queue.name, index: index++ });
+        if (index > MAX_LIST_ITEMS) break;
       }
       return {
         contents: [
@@ -60,17 +64,7 @@ export function registerQueueResources(server: McpServer): void {
   server.resource(
     "queue-properties",
     new ResourceTemplate("azure-queue:///queues/{queueName}/properties", {
-      list: async () => {
-        const resources: { uri: string; name: string; mimeType: string }[] = [];
-        for await (const queue of queueServiceClient.listQueues()) {
-          resources.push({
-            uri: `azure-queue:///queues/${encodeURIComponent(queue.name)}/properties`,
-            name: `${queue.name} properties`,
-            mimeType: "application/json",
-          });
-        }
-        return { resources };
-      },
+      list: undefined, // Discover queue names via the azure-queue:///queues static resource
     }),
     {
       description: "Get properties for a specific queue, including approximate message count and metadata. Use this to check queue depth before deciding whether to receive messages, or to inspect custom metadata. Returns a JSON object with 'name', 'approximateMessagesCount' (may lag by a few seconds), and 'metadata' (key-value pairs). The count is approximate — use queue-peek-messages or queue-receive-messages tools for exact message inspection.",

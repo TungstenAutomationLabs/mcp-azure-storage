@@ -26,6 +26,12 @@ const blobServiceClient = new BlobServiceClient(
   credential
 );
 
+/** Maximum number of items returned by listing resources to prevent oversized responses. */
+const MAX_LIST_ITEMS = 500;
+
+/** Maximum blob size (in bytes) that will be downloaded via the resource interface. */
+const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MiB
+
 /**
  * Registers all Blob Storage MCP resources on the given server instance.
  *
@@ -45,6 +51,7 @@ export function registerBlobResources(server: McpServer): void {
       let index = 1;
       for await (const container of blobServiceClient.listContainers()) {
         containers.push({ name: container.name, index: index++ });
+        if (index > MAX_LIST_ITEMS) break;
       }
       return {
         contents: [
@@ -62,17 +69,7 @@ export function registerBlobResources(server: McpServer): void {
   server.resource(
     "blob-container-properties",
     new ResourceTemplate("azure-blob:///containers/{containerName}/properties", {
-      list: async () => {
-        const resources: { uri: string; name: string; mimeType: string }[] = [];
-        for await (const container of blobServiceClient.listContainers()) {
-          resources.push({
-            uri: `azure-blob:///containers/${encodeURIComponent(container.name)}/properties`,
-            name: `${container.name} properties`,
-            mimeType: "application/json",
-          });
-        }
-        return { resources };
-      },
+      list: undefined, // Discover container names via the azure-blob:///containers static resource
     }),
     {
       description: "Get properties and metadata for a specific blob container. Use this to inspect container configuration (lease status, immutability policy, legal hold) or retrieve custom metadata before performing operations. Returns a JSON object with name, lastModified, leaseStatus, leaseState, hasImmutabilityPolicy, hasLegalHold, and metadata fields.",
@@ -107,17 +104,7 @@ export function registerBlobResources(server: McpServer): void {
   server.resource(
     "blob-list",
     new ResourceTemplate("azure-blob:///containers/{containerName}/blobs", {
-      list: async () => {
-        const resources: { uri: string; name: string; mimeType: string }[] = [];
-        for await (const container of blobServiceClient.listContainers()) {
-          resources.push({
-            uri: `azure-blob:///containers/${encodeURIComponent(container.name)}/blobs`,
-            name: `Blobs in ${container.name}`,
-            mimeType: "application/json",
-          });
-        }
-        return { resources };
-      },
+      list: undefined, // Discover container names via the azure-blob:///containers static resource
     }),
     {
       description: "List all blobs in a specific container. Use this to discover blob names, sizes, and content types before reading individual blobs. Returns a JSON array of objects with 'name', 'size' (bytes), 'contentType', 'lastModified' (ISO 8601), and 'index' (1-based) for each blob.",
@@ -136,6 +123,7 @@ export function registerBlobResources(server: McpServer): void {
           lastModified: blob.properties.lastModified?.toISOString() ?? "",
           index: index++,
         });
+        if (index > MAX_LIST_ITEMS) break;
       }
       return {
         contents: [
@@ -164,6 +152,14 @@ export function registerBlobResources(server: McpServer): void {
       const blobName = String(variables.blobName);
       const containerClient = blobServiceClient.getContainerClient(containerName);
       const blobClient = containerClient.getBlobClient(blobName);
+      // Check blob size before downloading to prevent OOM on large files
+      const properties = await blobClient.getProperties();
+      const size = properties.contentLength ?? 0;
+      if (size > MAX_DOWNLOAD_BYTES) {
+        throw new Error(
+          `Blob '${blobName}' is ${(size / 1024 / 1024).toFixed(1)} MiB which exceeds the ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MiB resource download limit. Use the blob-read tool with returnUrl=true to get a SAS URL instead.`
+        );
+      }
       const downloadResponse = await blobClient.download(0);
       const body = downloadResponse.readableStreamBody;
       if (!body) {

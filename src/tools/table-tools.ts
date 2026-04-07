@@ -56,6 +56,11 @@ export function registerTableTools(server: McpServer): void {
   function getTableClient(tableName: string): TableClient {
     let client = tableClientCache.get(tableName);
     if (!client) {
+      // Evict oldest entry if cache is full (simple FIFO eviction)
+      if (tableClientCache.size >= 100) {
+        const oldestKey = tableClientCache.keys().next().value;
+        if (oldestKey) tableClientCache.delete(oldestKey);
+      }
       client = new TableClient(
         `https://${config.accountName}.table.core.windows.net`,
         tableName,

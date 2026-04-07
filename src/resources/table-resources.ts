@@ -27,6 +27,12 @@ const tableServiceClient = new TableServiceClient(
   tableCredential
 );
 
+/** Maximum number of items returned by listing resources to prevent oversized responses. */
+const MAX_LIST_ITEMS = 500;
+
+/** Maximum number of cached TableClient instances to prevent unbounded memory growth. */
+const MAX_TABLE_CLIENT_CACHE = 100;
+
 /** Cache of TableClient instances keyed by table name. */
 const tableClientCache = new Map<string, TableClient>();
 
@@ -36,6 +42,11 @@ const tableClientCache = new Map<string, TableClient>();
 function getTableClient(tableName: string): TableClient {
   let client = tableClientCache.get(tableName);
   if (!client) {
+    // Evict oldest entry if cache is full (simple FIFO eviction)
+    if (tableClientCache.size >= MAX_TABLE_CLIENT_CACHE) {
+      const oldestKey = tableClientCache.keys().next().value;
+      if (oldestKey) tableClientCache.delete(oldestKey);
+    }
     client = new TableClient(
       `https://${config.accountName}.table.core.windows.net`,
       tableName,
@@ -67,6 +78,7 @@ export function registerTableResources(server: McpServer): void {
         if (table.name) {
           tables.push({ name: table.name, index: index++ });
         }
+        if (index > MAX_LIST_ITEMS) break;
       }
       return {
         contents: [
