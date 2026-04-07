@@ -7,8 +7,16 @@
 //   3. User-Assigned Managed Identity — shared identity for ACR pull + RBAC
 //   4. RBAC Role Assignments — AcrPull + Storage roles (before Container App)
 //   5. Container Apps Environment — managed Kubernetes hosting layer
-//   6. Storage Account — the Azure Storage account the MCP tools operate on
+//   6. Storage Account — created OR referenced (bring-your-own)
 //   7. Container App — the running MCP server instance
+//
+// Storage Account modes:
+//   • Default: provisions a new Storage Account in the same Resource Group.
+//   • Bring-your-own (BYOSA): set AZURE_STORAGE_ACCOUNT_NAME and
+//     AZURE_STORAGE_ACCOUNT_KEY in your azd environment to connect to an
+//     existing Storage Account (can be in any subscription/resource group).
+//     No new Storage Account is created; RBAC roles are skipped (you supply
+//     the key directly).
 //
 // Deployed via Azure Developer CLI:
 //   azd up        — provision infrastructure + build & deploy container
@@ -20,22 +28,37 @@
 // Container App. This breaks the circular dependency that exists with
 // system-assigned identities (where the principalId is only available
 // after the Container App is created, but ACR pull needs credentials
-// during creation). The identity is granted AcrPull, Blob/Queue/Table
-// Data Contributor roles before the Container App is provisioned.
+// during creation). The identity is granted AcrPull and (when provisioning
+// a new storage account) Blob/Queue/Table Data Contributor roles before
+// the Container App is provisioned.
 // =============================================================================
 
 targetScope = 'resourceGroup'
 
 // ── Parameters ────────────────────────────────────────────────
-// location:        Azure region; defaults to the resource group's location.
-// environmentName: Base name used to derive all child resource names.
-// mcpApiKey:       Bearer token clients must present to authenticate MCP requests.
+// location:                    Azure region; defaults to the resource group's location.
+// environmentName:             Base name used to derive all child resource names.
+// mcpApiKey:                   Bearer token clients must present to authenticate MCP requests.
+// existingStorageAccountName:  (Optional) Use an existing Storage Account instead of creating one.
+// existingStorageAccountKey:   (Optional) Access key for the existing Storage Account.
 
 param location string = resourceGroup().location
 param environmentName string
 
 @secure()
 param mcpApiKey string
+
+// ── Bring-Your-Own Storage Account (BYOSA) ───────────────────
+// When both are set, the template skips creating a new Storage Account
+// and uses the provided credentials directly. This lets you connect to
+// a storage account in any subscription, resource group, or tenant.
+param existingStorageAccountName string = ''
+
+@secure()
+param existingStorageAccountKey string = ''
+
+// Computed flag: true when the user is bringing their own storage account.
+var useExistingStorage = !empty(existingStorageAccountName) && !empty(existingStorageAccountKey)
 
 // ── Placeholder Image ─────────────────────────────────────────
 // During `azd provision`, the Container App always starts with this public
@@ -81,7 +104,8 @@ resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' =
 //
 // The identity is used for:
 //   1. ACR image pull (via AcrPull role)
-//   2. Storage RBAC (Blob/Queue/Table Data Contributor roles)
+//   2. Storage RBAC (Blob/Queue/Table Data Contributor roles) — only when
+//      provisioning a new storage account (not for BYOSA)
 resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: '${environmentName}-identity'
   location: location
@@ -133,12 +157,20 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-// ── Storage Account ──────────────────────────────────────────
-// The Azure Storage account that the MCP tools read from and write to.
-// - Standard_LRS: locally-redundant storage (cheapest; upgrade to GRS for production).
-// - StorageV2: supports Blob, Queue, Table, and File Share services.
-// - HTTPS-only with TLS 1.2 minimum for security compliance.
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+// =============================================================================
+// Storage Account — conditional on BYOSA mode
+//
+// When useExistingStorage is false (default): provisions a new Storage Account
+// and grants the managed identity RBAC roles for Blob, Queue, and Table.
+//
+// When useExistingStorage is true: no storage resources are created. The
+// Container App uses the provided account name and key directly. RBAC roles
+// are skipped because the existing account may be in a different resource
+// group, subscription, or tenant where Bicep cannot assign roles.
+// =============================================================================
+
+// ── Storage Account (new, only when NOT using BYOSA) ─────────
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!useExistingStorage) {
   name: '${replace(environmentName, '-', '')}stor'
   location: location
   sku: { name: 'Standard_LRS' }
@@ -150,10 +182,12 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
-// ── Role: Storage Blob Data Contributor ──────────────────────
-// Grants read/write/delete access to blob containers and blobs.
-// Used by blob-tools.ts for container and blob operations.
-resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+// ── Storage RBAC (only for newly-provisioned storage accounts) ──
+// Skipped in BYOSA mode because:
+//   a) The existing account may be in a different resource group/subscription
+//   b) The user provides a shared key, so RBAC is not required for data access
+
+resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!useExistingStorage) {
   name: guid(storageAccount.id, managedIdentity.id, 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
   scope: storageAccount
   properties: {
@@ -163,10 +197,7 @@ resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01'
   }
 }
 
-// ── Role: Storage Queue Data Contributor ─────────────────────
-// Grants read/write/delete access to queues and messages.
-// Used by queue-tools.ts for queue CRUD and message processing.
-resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!useExistingStorage) {
   name: guid(storageAccount.id, managedIdentity.id, '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
   scope: storageAccount
   properties: {
@@ -176,10 +207,7 @@ resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
-// ── Role: Storage Table Data Contributor ─────────────────────
-// Grants read/write/delete access to tables and entities.
-// Used by table-tools.ts for table CRUD and entity queries.
-resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!useExistingStorage) {
   name: guid(storageAccount.id, managedIdentity.id, '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
   scope: storageAccount
   properties: {
@@ -189,14 +217,20 @@ resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
+// ── Resolved storage values ──────────────────────────────────
+// These variables select between BYOSA and newly-provisioned values.
+// Used by the Container App's env vars and secrets.
+var resolvedStorageAccountName = useExistingStorage ? existingStorageAccountName : storageAccount.name
+var resolvedStorageAccountKey = useExistingStorage ? existingStorageAccountKey : storageAccount.listKeys().keys[0].value
+
 // ── Container App ────────────────────────────────────────────
 // The main application resource. Runs the MCP server Docker image as a
 // serverless container with automatic HTTPS and auto-scaling.
 //
 // Uses a user-assigned managed identity for passwordless ACR pull and
-// Storage RBAC. The AcrPull role assignment is completed BEFORE this
-// resource is created (via dependsOn), eliminating the circular dependency
-// that previously caused UNAUTHORIZED errors on first provision.
+// (when not using BYOSA) Storage RBAC. The AcrPull role assignment is
+// completed BEFORE this resource is created (via dependsOn), eliminating
+// the circular dependency that previously caused UNAUTHORIZED errors.
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${environmentName}-mcp'
   location: location
@@ -211,7 +245,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
   dependsOn: [
     acrPullRoleAssignment    // Ensure ACR pull permission exists before first image pull
-    blobRoleAssignment       // Ensure storage roles are ready when app starts
+    blobRoleAssignment       // Ensure storage roles are ready when app starts (no-op if BYOSA)
     queueRoleAssignment
     tableRoleAssignment
   ]
@@ -221,14 +255,6 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       // ── Ingress ──
       // External ingress exposes the app on a public *.azurecontainerapps.io URL
       // with automatic HTTPS and a managed TLS certificate.
-      //
-      // Note: Sticky sessions (session affinity) are not enabled here because
-      // Azure Container Apps has limited API support for the feature across
-      // revision modes. The MCP server handles this at the application layer:
-      //  - Stateful mode: sessions are keyed by Mcp-Session-Id header
-      //  - Stateless mode: each request is self-contained (no affinity needed)
-      // For production with multiple replicas, consider adding external session
-      // state (e.g. Redis) or enabling sticky sessions if your API version supports it.
       ingress: {
         external: true
         targetPort: 3000         // Must match the Express PORT in Dockerfile
@@ -254,7 +280,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         }
         {
           name: 'storage-account-key'
-          value: storageAccount.listKeys().keys[0].value
+          value: resolvedStorageAccountKey
         }
       ]
     }
@@ -274,37 +300,24 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           env: [
             {
               name: 'NODE_ENV'
-              value: 'production'                  // Ensures production-mode behaviour even if Dockerfile ENV is overridden
+              value: 'production'
             }
             {
               name: 'AZURE_STORAGE_ACCOUNT_NAME'
-              value: storageAccount.name
+              value: resolvedStorageAccountName
             }
             {
               name: 'AZURE_STORAGE_ACCOUNT_KEY'
-              secretRef: 'storage-account-key'   // Injected from secrets array above
+              secretRef: 'storage-account-key'
             }
             {
               name: 'MCP_API_KEY'
-              secretRef: 'mcp-api-key'           // Injected from secrets array above
+              secretRef: 'mcp-api-key'
             }
           ]
-          // ── Health Probes ──
-          // Note: Custom health probes are intentionally omitted. During the
-          // initial `azd provision`, the Container App runs a placeholder image
-          // that does NOT expose /health on port 3000. Health probes against
-          // the placeholder would fail for 20+ minutes until the revision times
-          // out, blocking deployment.
-          //
-          // Azure Container Apps provides built-in TCP health checks automatically.
-          // The MCP server exposes GET /health for manual monitoring and external
-          // health checks (e.g., Azure Front Door, uptime monitors).
         }
       ]
       // ── Auto-scaling ──
-      // minReplicas: 0 allows scale-to-zero when idle (cost saving).
-      // maxReplicas: 5 caps horizontal scaling.
-      // HTTP rule: add a replica when concurrent requests per replica exceed 20.
       scale: {
         minReplicas: 0
         maxReplicas: 5
@@ -327,13 +340,6 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 // These values are captured by azd and stored in .azure/<env>/.env for
 // subsequent commands. They are also displayed in `azd show` output.
 
-// AZURE_CONTAINER_REGISTRY_ENDPOINT: azd uses this to know where to push
-// Docker images during `azd deploy`. Must be an output with this exact name.
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerRegistry.properties.loginServer
-
-// mcpEndpoint: the full URL clients use to connect to the MCP server.
 output mcpEndpoint string = 'https://${containerApp.properties.configuration.ingress.fqdn}/mcp'
-
-// storageAccountName: the provisioned storage account name (useful for
-// local development configuration in .env files).
-output storageAccountName string = storageAccount.name
+output storageAccountName string = resolvedStorageAccountName

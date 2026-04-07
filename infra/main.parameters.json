@@ -10,6 +10,12 @@
     },
     "mcpApiKey": {
       "value": "${MCP_API_KEY}"
+    },
+    "existingStorageAccountName": {
+      "value": "${AZURE_STORAGE_ACCOUNT_NAME}"
+    },
+    "existingStorageAccountKey": {
+      "value": "${AZURE_STORAGE_ACCOUNT_KEY}"
     }
   }
 }

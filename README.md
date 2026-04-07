@@ -111,6 +111,7 @@ mcp-azure-storage/
 ├── Dockerfile                 # Multi-stage build, non-root user
 ├── .dockerignore              # Excludes .env, docs, infra from image
 ├── azure.yaml                 # Azure Developer CLI project definition
+├── .azure.env.example         # Template for azd deployment environment variables
 ├── .env.example               # Template for local environment variables
 ├── .gitignore                 # Ignores .env, dist, node_modules, docs
 ├── tsconfig.json              # TypeScript configuration
@@ -413,9 +414,19 @@ azd auth login
 azd init
 ```
 
-### 3. Set secrets
+This prompts you for an **environment name** (e.g. `mcp-azure-storage-dev`), **Azure subscription**, and **location**. It creates a `.azure/<env-name>/.env` file to store configuration for subsequent commands.
 
-Generate a random API key and store it in your azd environment:
+### 3. Set deployment variables
+
+azd stores environment variables in `.azure/<env-name>/.env`. Some are set automatically by `azd init`; others need to be set manually. See [`.azure.env.example`](.azure.env.example) for the full template with descriptions.
+
+**Required — set before first deploy:**
+
+```bash
+azd env set MCP_API_KEY "your-strong-secret-key-here"
+```
+
+Or generate a random key:
 
 **macOS / Linux:**
 ```bash
@@ -427,10 +438,52 @@ azd env set MCP_API_KEY "$(openssl rand -base64 24)"
 azd env set MCP_API_KEY ([Convert]::ToBase64String((1..24 | ForEach-Object { Get-Random -Max 256 }) -as [byte[]]))
 ```
 
-Or simply set a strong key of your choice:
+**Optional — use an existing Storage Account (BYOSA):**
+
+By default, `azd provision` creates a **new empty** Storage Account. To connect to an **existing** storage account (e.g. one that already contains your data), set both variables before deploying:
+
 ```bash
-azd env set MCP_API_KEY "your-strong-secret-key-here"
+azd env set AZURE_STORAGE_ACCOUNT_NAME "yourstorageaccount"
+azd env set AZURE_STORAGE_ACCOUNT_KEY "youraccountkey"
 ```
+
+> **Finding your storage account key:**
+> ```bash
+> az storage account keys list --account-name yourstorageaccount --query "[0].value" -o tsv
+> ```
+
+When both are set:
+- No new Storage Account is created by Bicep
+- Storage RBAC role assignments are skipped
+- The Container App connects directly using the provided credentials
+- The existing account can be in any subscription, resource group, or region
+
+Leave them **unset** to have Bicep provision a new storage account automatically.
+
+**Auto-populated after `azd init`** (no action needed):
+
+| Variable | Description |
+|----------|-------------|
+| `AZURE_ENV_NAME` | Environment name chosen during `azd init` |
+| `AZURE_LOCATION` | Azure region chosen during `azd init` |
+| `AZURE_SUBSCRIPTION_ID` | Azure subscription chosen during `azd init` |
+
+**Auto-populated after `azd provision`** (no action needed):
+
+| Variable | Description |
+|----------|-------------|
+| `AZURE_CONTAINER_REGISTRY_ENDPOINT` | ACR login server (Bicep output) |
+| `mcpEndpoint` | Full MCP endpoint URL (Bicep output) |
+| `storageAccountName` | Provisioned storage account name (Bicep output) |
+
+**Auto-populated after `azd deploy`** (no action needed):
+
+| Variable | Description |
+|----------|-------------|
+| `SERVICE_MCP_SERVER_IMAGE_NAME` | Docker image pushed to ACR |
+| `SERVICE_MCP_SERVER_RESOURCE_EXISTS` | Whether the Container App resource exists |
+
+> **Tip:** View all current environment values with `azd env get-values`. To start fresh after a teardown, delete the `.azure/<env-name>/` directory or run `azd env new <new-name>`.
 
 ### 4. Deploy
 

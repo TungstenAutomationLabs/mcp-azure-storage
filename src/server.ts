@@ -42,6 +42,14 @@ import { registerTableResources } from "./resources/table-resources.js";
 // ── Express application ──────────────────────────────────────────────────────
 const app = express();
 
+// Trust the reverse proxy (Azure Container Apps / Azure Front Door).
+// Required so that:
+//  1. express-rate-limit uses the real client IP from X-Forwarded-For
+//     (without this, all requests appear to come from the proxy IP)
+//  2. req.ip / req.protocol reflect the original client connection
+// Safe because Container Apps always terminates TLS and sets forwarded headers.
+app.set("trust proxy", true);
+
 // Security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
 app.use(helmet());
 
