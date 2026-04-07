@@ -62,7 +62,7 @@ export function registerQueueTools(server: McpServer): void {
 
   server.tool(
     "queue-delete",
-    "Permanently delete a queue and ALL messages in it. WARNING: This is irreversible — all pending messages will be lost. Use 'queue-get-properties' to check the message count before deleting.",
+    "Permanently delete a queue and ALL messages in it. WARNING: This is irreversible — all pending messages will be lost. Check the azure-queue:///queues/{queueName}/properties resource for the message count before deleting.",
     { queueName: z.string().describe("Name of the queue to delete (e.g. 'order-processing')") },
     async ({ queueName }) => {
       const client = queueServiceClient;

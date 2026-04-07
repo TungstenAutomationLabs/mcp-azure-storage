@@ -188,7 +188,7 @@ export function registerTableTools(server: McpServer): void {
 
   server.tool(
     "table-entity-delete",
-    "Permanently delete a single entity by its partition key and row key. WARNING: This is irreversible. Use 'table-entity-get' to verify the entity exists before deleting. Returns JSON with 'success' and the deleted key pair.",
+    "Permanently delete a single entity by its partition key and row key. WARNING: This is irreversible. Use the azure-table:///tables/{tableName}/entities/{partitionKey}/{rowKey} resource to verify the entity exists before deleting. Returns JSON with 'success' and the deleted key pair.",
     {
       tableName: z.string().describe("Name of the table (e.g. 'OrderHistory')"),
       partitionKey: z.string().describe("Partition key of the entity to delete (e.g. 'sales-region-west')"),

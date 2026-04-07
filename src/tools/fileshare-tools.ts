@@ -157,7 +157,7 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-delete-directory",
-    "Delete a directory from a file share. The directory MUST be empty — delete all files and subdirectories inside it first, or the operation will fail. Use 'fileshare-list' to check contents before deleting.",
+    "Delete a directory from a file share. The directory MUST be empty — delete all files and subdirectories inside it first, or the operation will fail. Use the azure-fileshare:///shares/{shareName}/files/{directoryPath} resource to check contents before deleting.",
     {
       shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
       directoryPath: z.string().describe("Path of the directory to delete (e.g. 'reports/2024/q1')"),
