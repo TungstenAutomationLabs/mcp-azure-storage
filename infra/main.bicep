@@ -112,10 +112,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   properties: {
     managedEnvironmentId: containerAppEnv.id
     configuration: {
-      // Multiple revision mode is required for sticky sessions (session affinity).
-      // It allows multiple revisions to coexist during rolling deployments while
-      // maintaining client-to-replica routing for stateful MCP sessions.
-      activeRevisionsMode: 'Multiple'
+      // Single revision mode (default) is required for sticky sessions.
+      // Azure Container Apps only supports session affinity in Single mode.
+      // Deployments replace the active revision atomically (brief downtime).
       // ── Ingress ──
       // External ingress exposes the app on a public *.azurecontainerapps.io URL
       // with automatic HTTPS and a managed TLS certificate.
