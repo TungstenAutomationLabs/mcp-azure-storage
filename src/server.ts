@@ -34,6 +34,10 @@ import { registerTableTools } from "./tools/table-tools.js";
 import { registerQueueTools } from "./tools/queue-tools.js";
 import { registerFileShareTools } from "./tools/fileshare-tools.js";
 import { registerUtilityTools } from "./tools/utility-tools.js";
+import { registerBlobResources } from "./resources/blob-resources.js";
+import { registerFileShareResources } from "./resources/fileshare-resources.js";
+import { registerQueueResources } from "./resources/queue-resources.js";
+import { registerTableResources } from "./resources/table-resources.js";
 
 // ── Express application ──────────────────────────────────────────────────────
 const app = express();
@@ -64,11 +68,12 @@ app.use(express.json({ limit: "50mb" }));
 // ── MCP server factory ───────────────────────────────────────────────────────
 
 /**
- * Create a fresh MCP server instance with all 42 tools registered.
+ * Create a fresh MCP server instance with all 42 tools and 12 resources.
  *
  * A new instance is created for each stateful session and each stateless
- * request. Tool registrations read the shared singleton StorageConfig and
- * SDK clients from their respective modules, so this is lightweight.
+ * request. Tool and resource registrations read the shared singleton
+ * StorageConfig and SDK clients from their respective modules, so this
+ * is lightweight.
  *
  * @returns A fully-configured McpServer ready to connect to a transport.
  */
@@ -78,11 +83,18 @@ function createMcpServer(): McpServer {
     version: "1.0.0",
   });
 
+  // ── Tools (42 total) — actions that read or mutate storage ──
   registerBlobTools(server);
   registerTableTools(server);
   registerQueueTools(server);
   registerFileShareTools(server);
   registerUtilityTools(server);
+
+  // ── Resources (12 total) — read-only, URI-addressable data ──
+  registerBlobResources(server);
+  registerFileShareResources(server);
+  registerQueueResources(server);
+  registerTableResources(server);
 
   return server;
 }

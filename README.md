@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **42 tools** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **42 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and Bicep infrastructure-as-code.
 
@@ -9,6 +9,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and 
 ## Features
 
 - **42 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **12 MCP resources** — read-only, URI-addressable data for LLM context (listings, content reads, properties)
 - **Dual-mode transport** — stateful sessions for MCP clients + stateless one-shot for HTTP testing
 - **API key authentication** with constant-time comparison (X-API-Key header or Bearer token)
 - **Rate limiting** — configurable per-IP request limits
@@ -65,12 +66,17 @@ mcp-azure-storage/
 │   ├── config.ts              # Storage config from env vars (singleton)
 │   ├── middleware/
 │   │   └── api-key.ts         # API key auth (X-API-Key / Bearer)
-│   └── tools/
-│       ├── blob-tools.ts      # 11 tools — container + blob CRUD, SAS, metadata
-│       ├── queue-tools.ts     #  8 tools — queue CRUD + message operations
-│       ├── table-tools.ts     #  7 tools — table CRUD + entity operations
-│       ├── fileshare-tools.ts #  9 tools — share/directory/file operations
-│       └── utility-tools.ts   #  6 tools — base64, SAS refresh, MIME lookup
+│   ├── tools/
+│   │   ├── blob-tools.ts      # 11 tools — container + blob CRUD, SAS, metadata
+│   │   ├── queue-tools.ts     #  8 tools — queue CRUD + message operations
+│   │   ├── table-tools.ts     #  7 tools — table CRUD + entity operations
+│   │   ├── fileshare-tools.ts # 10 tools — share/directory/file operations
+│   │   └── utility-tools.ts   #  6 tools — base64, SAS refresh, MIME lookup
+│   └── resources/
+│       ├── blob-resources.ts      #  4 resources — containers, blobs, properties
+│       ├── fileshare-resources.ts #  4 resources — shares, files, properties
+│       ├── queue-resources.ts     #  2 resources — queues, queue properties
+│       └── table-resources.ts     #  2 resources — tables, entity lookup
 ├── infra/
 │   ├── main.bicep             # Azure Container Apps + Storage + RBAC
 │   └── main.parameters.json   # azd-templated deployment parameters
@@ -155,6 +161,42 @@ mcp-azure-storage/
 | `util-refresh-container-sas` | Generate a fresh SAS token + connection string for a container. Use to replace an expired container SAS. |
 | `util-get-content-type` | MIME type lookup by file name or extension. Returns `application/octet-stream` for unrecognised types. |
 | `util-to-container-name` | Sanitise arbitrary text (email, URL, display name) into a valid Azure container name. Use BEFORE `blob-container-create`. |
+
+### MCP Resources (12 resources)
+
+Resources provide **read-only, URI-addressable** access to storage data. Unlike tools (which are actions), resources allow agents to directly attach storage data as LLM context without invoking a tool call. Resources complement the tools above — use resources for reading/browsing and tools for mutations.
+
+#### Blob Storage Resources (4)
+
+| Resource URI | Description |
+|---|---|
+| `azure-blob:///containers` | List all blob containers. Starting point to discover containers before reading blobs. Returns JSON with name and index. |
+| `azure-blob:///containers/{containerName}/properties` | Container properties and metadata (lease status, immutability policy, legal hold). |
+| `azure-blob:///containers/{containerName}/blobs` | List all blobs in a container with name, size, content type, and last-modified date. |
+| `azure-blob:///containers/{containerName}/blobs/{blobName}` | Read blob content. Text blobs returned as UTF-8 text; binary blobs as base64. |
+
+#### File Share Resources (4)
+
+| Resource URI | Description |
+|---|---|
+| `azure-fileshare:///shares` | List all file shares. Starting point to discover shares before browsing directories. Returns JSON with name and index. |
+| `azure-fileshare:///shares/{shareName}/files/{directoryPath}` | List files and subdirectories in a directory. Use empty directoryPath for root. Returns name, type, size. |
+| `azure-fileshare:///shares/{shareName}/file/{directoryPath}/{fileName}` | Read file content. Text files returned as UTF-8 text; binary files as base64. |
+| `azure-fileshare:///shares/{shareName}/properties/{directoryPath}/{fileName}` | File properties (size, content type, timestamps, metadata) without downloading content. |
+
+#### Queue Storage Resources (2)
+
+| Resource URI | Description |
+|---|---|
+| `azure-queue:///queues` | List all queues. Messages are accessed via tools (not resources) because receiving has side effects. |
+| `azure-queue:///queues/{queueName}/properties` | Queue properties including approximate message count and metadata. |
+
+#### Table Storage Resources (2)
+
+| Resource URI | Description |
+|---|---|
+| `azure-table:///tables` | List all tables. Use before querying or upserting entities via tools. |
+| `azure-table:///tables/{tableName}/entities/{partitionKey}/{rowKey}` | Get a single entity by composite key. Faster than a query when you know the exact key. |
 
 ---
 
@@ -262,6 +304,28 @@ Skip `initialize` entirely — send tool calls directly:
     "arguments": {}
   },
   "id": 2
+}
+```
+
+**List resources:**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "resources/list",
+  "params": {},
+  "id": 3
+}
+```
+
+**Read a resource:**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "resources/read",
+  "params": {
+    "uri": "azure-blob:///containers"
+  },
+  "id": 4
 }
 ```
 
