@@ -77,10 +77,37 @@ mcp-azure-storage/
 │       ├── fileshare-resources.ts #  4 resources — shares, files, properties
 │       ├── queue-resources.ts     #  2 resources — queues, queue properties
 │       └── table-resources.ts     #  2 resources — tables, entity lookup
+├── tests/
+│   ├── setup.ts               # Test env bootstrap (dummy credentials)
+│   ├── config.test.ts         # Config module tests
+│   ├── helpers/
+│   │   └── mcp-test-harness.ts  # Stateless MCP endpoint + SSE-aware helpers
+│   ├── middleware/
+│   │   └── api-key.test.ts    # API key auth tests (503/401/403/pass-through)
+│   ├── tools/
+│   │   ├── blob-tools.test.ts      # 10 tests — mock Azure Blob SDK
+│   │   ├── queue-tools.test.ts     #  9 tests — mock Azure Queue SDK
+│   │   ├── table-tools.test.ts     #  9 tests — mock Azure Tables SDK
+│   │   ├── fileshare-tools.test.ts #  8 tests — mock Azure File Share SDK
+│   │   └── utility-tools.test.ts   #  8 tests — base64, MIME, container name
+│   ├── resources/
+│   │   ├── blob-resources.test.ts      # 6 tests — list cap, download guard
+│   │   ├── queue-resources.test.ts     # 3 tests — list cap, properties
+│   │   ├── table-resources.test.ts     # 3 tests — list cap, entity lookup
+│   │   └── fileshare-resources.test.ts # 4 tests — list cap, size guard
+│   └── integration/
+│       ├── blob-integration.test.ts    # Azurite blob CRUD smoke test
+│       ├── queue-integration.test.ts   # Azurite queue CRUD smoke test
+│       └── table-integration.test.ts   # Azurite table CRUD smoke test
 ├── infra/
 │   ├── main.bicep             # Azure Container Apps + Storage + RBAC
 │   └── main.parameters.json   # azd-templated deployment parameters
-├── docs/                      # Internal design documents (gitignored)
+├── .github/workflows/
+│   └── ci.yml                 # GitHub Actions — unit + integration tests
+├── docker-compose.azurite.yml # Azurite emulator for local integration tests
+├── vitest.config.ts           # Unit test config (coverage, thresholds)
+├── vitest.integration.config.ts # Integration test config (Azurite)
+├── .env.test                  # Azurite well-known credentials for tests
 ├── Dockerfile                 # Multi-stage build, non-root user
 ├── .dockerignore              # Excludes .env, docs, infra from image
 ├── azure.yaml                 # Azure Developer CLI project definition
@@ -525,6 +552,86 @@ azd down --purge
 | `dev` | `npm run dev` | Start dev server with hot reload (`tsx watch`) |
 | `build` | `npm run build` | Compile TypeScript to `dist/` |
 | `start` | `npm run start` | Run compiled production build |
+| `test` | `npm test` | Run unit tests (no Azure needed) |
+| `test:watch` | `npm run test:watch` | Run tests in watch mode |
+| `test:coverage` | `npm run test:coverage` | Run tests with v8 coverage report |
+| `test:integration` | `npm run test:integration` | Run Azurite integration tests |
+
+---
+
+## Testing
+
+### Unit Tests (73 tests, no Azure required)
+
+Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
+
+```bash
+# Run all unit tests
+npm test
+
+# Watch mode
+npm run test:watch
+
+# With coverage report
+npm run test:coverage
+```
+
+**Test coverage:** Config, API key middleware, all 42 tools across 5 modules, all 12 resources across 4 modules.
+
+### Integration Tests (Azurite)
+
+Integration tests run against [Azurite](https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite), the official Azure Storage emulator. They perform real CRUD operations against Blob, Queue, and Table services.
+
+#### 1. Start Azurite
+
+```bash
+docker compose -f docker-compose.azurite.yml up -d
+```
+
+#### 2. Run integration tests
+
+```bash
+npm run test:integration
+```
+
+This sets `TEST_INTEGRATION=1` and uses the Azurite well-known credentials from `.env.test`.
+
+#### 3. Stop Azurite
+
+```bash
+docker compose -f docker-compose.azurite.yml down
+```
+
+### CI / GitHub Actions
+
+The [`.github/workflows/ci.yml`](.github/workflows/ci.yml) workflow runs on every push and PR to `main`:
+
+1. **Unit tests** — Node 20 + 22 matrix, with coverage upload on Node 22
+2. **Integration tests** — Azurite service container, Node 22, blob/queue/table CRUD
+
+### Test Architecture
+
+```
+tests/
+├── helpers/mcp-test-harness.ts   # createTestApp(), mcpPost(), SSE parsers
+├── config.test.ts                # getStorageConfig singleton + env vars
+├── middleware/api-key.test.ts    # Auth middleware (503/401/403/pass-through)
+├── tools/                        # vi.mock Azure SDKs → test via MCP endpoint
+│   ├── blob-tools.test.ts
+│   ├── queue-tools.test.ts
+│   ├── table-tools.test.ts
+│   ├── fileshare-tools.test.ts
+│   └── utility-tools.test.ts
+├── resources/                    # vi.hoisted + vi.mock for module-scope clients
+│   ├── blob-resources.test.ts
+│   ├── queue-resources.test.ts
+│   ├── table-resources.test.ts
+│   └── fileshare-resources.test.ts
+└── integration/                  # Real CRUD against Azurite (gated by TEST_INTEGRATION)
+    ├── blob-integration.test.ts
+    ├── queue-integration.test.ts
+    └── table-integration.test.ts
+```
 
 ---
 

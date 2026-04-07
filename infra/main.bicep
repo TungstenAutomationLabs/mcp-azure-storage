@@ -106,6 +106,9 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${environmentName}-mcp'
   location: location
+  tags: {
+    'azd-service-name': 'mcp-server'   // Required: maps this resource to the service in azure.yaml
+  }
   identity: {
     type: 'SystemAssigned'   // Creates an AAD service principal tied to this app
   }

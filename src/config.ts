@@ -11,6 +11,10 @@
  * Optional environment variables:
  *  - `SAS_EXPIRY_HOURS`        — default SAS token lifetime in hours (default: 24)
  *  - `SAS_DEFAULT_PERMISSIONS`  — default SAS permission string (default: "rl")
+ *  - `AZURE_BLOB_SERVICE_URL`   — override Blob service URL (for Azurite or emulator)
+ *  - `AZURE_QUEUE_SERVICE_URL`  — override Queue service URL (for Azurite or emulator)
+ *  - `AZURE_TABLE_SERVICE_URL`  — override Table service URL (for Azurite or emulator)
+ *  - `AZURE_FILE_SERVICE_URL`   — override File Share service URL (for Azurite or emulator)
  *
  * @module config
  */
@@ -25,6 +29,14 @@ export interface StorageConfig {
   sasExpiryHours: number;
   /** Default SAS permission string (from env or "rl"). */
   sasDefaultPermissions: string;
+  /**
+   * Optional endpoint URL overrides for local emulators (Azurite).
+   * When set, SDK clients use these URLs instead of constructing from accountName.
+   */
+  blobServiceUrl?: string;
+  queueServiceUrl?: string;
+  tableServiceUrl?: string;
+  fileServiceUrl?: string;
 }
 
 /** Cached singleton — populated on first call to getStorageConfig(). */
@@ -54,7 +66,20 @@ export function getStorageConfig(): StorageConfig {
     accountKey,
     sasExpiryHours: parseInt(process.env.SAS_EXPIRY_HOURS || "24", 10),
     sasDefaultPermissions: process.env.SAS_DEFAULT_PERMISSIONS || "rl",
+    blobServiceUrl: process.env.AZURE_BLOB_SERVICE_URL || undefined,
+    queueServiceUrl: process.env.AZURE_QUEUE_SERVICE_URL || undefined,
+    tableServiceUrl: process.env.AZURE_TABLE_SERVICE_URL || undefined,
+    fileServiceUrl: process.env.AZURE_FILE_SERVICE_URL || undefined,
   };
 
   return _config;
+}
+
+/**
+ * Reset the cached config singleton.
+ * **Only for use in tests** — allows re-reading env vars between test cases.
+ * @internal
+ */
+export function _resetConfigForTesting(): void {
+  _config = null;
 }

@@ -40,10 +40,9 @@ export function registerBlobTools(server: McpServer): void {
     config.accountName,
     config.accountKey
   );
-  const blobServiceClient = new BlobServiceClient(
-    `https://${config.accountName}.blob.core.windows.net`,
-    credential
-  );
+  const blobServiceUrl =
+    config.blobServiceUrl || `https://${config.accountName}.blob.core.windows.net`;
+  const blobServiceClient = new BlobServiceClient(blobServiceUrl, credential);
 
   // ──────────────────────────────────────────────────────────────
   // CONTAINER OPERATIONS

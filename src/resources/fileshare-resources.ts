@@ -21,10 +21,9 @@ import { getStorageConfig } from "../config.js";
 // ── Singleton File Share Service Client ────────────────────────
 const config = getStorageConfig();
 const credential = new StorageSharedKeyCredential(config.accountName, config.accountKey);
-const shareServiceClient = new ShareServiceClient(
-  `https://${config.accountName}.file.core.windows.net`,
-  credential
-);
+const fileServiceUrl =
+  config.fileServiceUrl || `https://${config.accountName}.file.core.windows.net`;
+const shareServiceClient = new ShareServiceClient(fileServiceUrl, credential);
 
 /** Maximum number of items returned by listing resources to prevent oversized responses. */
 const MAX_LIST_ITEMS = 500;

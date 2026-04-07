@@ -19,10 +19,9 @@ import { getStorageConfig } from "../config.js";
 // ── Singleton Queue Service Client ─────────────────────────────
 const config = getStorageConfig();
 const credential = new StorageSharedKeyCredential(config.accountName, config.accountKey);
-const queueServiceClient = new QueueServiceClient(
-  `https://${config.accountName}.queue.core.windows.net`,
-  credential
-);
+const queueServiceUrl =
+  config.queueServiceUrl || `https://${config.accountName}.queue.core.windows.net`;
+const queueServiceClient = new QueueServiceClient(queueServiceUrl, credential);
 
 /** Maximum number of items returned by listing resources to prevent oversized responses. */
 const MAX_LIST_ITEMS = 500;

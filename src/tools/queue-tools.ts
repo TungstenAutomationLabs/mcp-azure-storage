@@ -36,10 +36,9 @@ export function registerQueueTools(server: McpServer): void {
     config.accountName,
     config.accountKey
   );
-  const queueServiceClient = new QueueServiceClient(
-    `https://${config.accountName}.queue.core.windows.net`,
-    credential
-  );
+  const queueServiceUrl =
+    config.queueServiceUrl || `https://${config.accountName}.queue.core.windows.net`;
+  const queueServiceClient = new QueueServiceClient(queueServiceUrl, credential);
 
   // ── QUEUE MANAGEMENT ─────────────────────────────────────────────────────
 

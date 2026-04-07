@@ -21,10 +21,9 @@ import { getStorageConfig } from "../config.js";
 // ── Singleton Blob Service Client ──────────────────────────────
 const config = getStorageConfig();
 const credential = new StorageSharedKeyCredential(config.accountName, config.accountKey);
-const blobServiceClient = new BlobServiceClient(
-  `https://${config.accountName}.blob.core.windows.net`,
-  credential
-);
+const blobServiceUrl =
+  config.blobServiceUrl || `https://${config.accountName}.blob.core.windows.net`;
+const blobServiceClient = new BlobServiceClient(blobServiceUrl, credential);
 
 /** Maximum number of items returned by listing resources to prevent oversized responses. */
 const MAX_LIST_ITEMS = 500;

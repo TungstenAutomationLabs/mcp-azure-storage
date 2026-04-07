@@ -37,10 +37,9 @@ export function registerFileShareTools(server: McpServer): void {
     config.accountName,
     config.accountKey
   );
-  const shareServiceClient = new ShareServiceClient(
-    `https://${config.accountName}.file.core.windows.net`,
-    credential
-  );
+  const fileServiceUrl =
+    config.fileServiceUrl || `https://${config.accountName}.file.core.windows.net`;
+  const shareServiceClient = new ShareServiceClient(fileServiceUrl, credential);
 
   // ── SHARE MANAGEMENT ─────────────────────────────────────────────────────
 
