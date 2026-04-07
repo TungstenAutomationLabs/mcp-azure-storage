@@ -30,7 +30,7 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-container-list",
-    "List all blob containers in the storage account",
+    "List all blob containers in the storage account. Use this to discover available containers before performing blob operations. Returns an array of objects with 'name' and 'lastModified' for each container.",
     {},
     async () => {
       const client = getBlobServiceClient();
@@ -49,12 +49,12 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-container-create",
-    "Create a blob container if it doesn't already exist",
+    "Create a new blob container if it doesn't already exist. Use this before uploading blobs to a new container. Idempotent — safe to call even if the container already exists. Returns a confirmation message indicating whether the container was created or already existed.",
     {
       containerName: z
         .string()
         .regex(/^[a-z0-9](-*[a-z0-9])*$/)
-        .describe("Container name (lowercase, numbers, hyphens only)"),
+        .describe("Container name (3-63 chars, lowercase letters, numbers, and hyphens only, e.g. 'my-data-2024'). Use 'util-to-container-name' to sanitise arbitrary text."),
     },
     async ({ containerName }) => {
       const client = getBlobServiceClient();
@@ -84,9 +84,9 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-container-delete",
-    "Delete a blob container",
+    "Permanently delete a blob container and ALL blobs inside it. WARNING: This is irreversible — all data in the container will be lost. Use 'blob-container-exists' first to verify the container exists. Returns a confirmation or a message if the container was not found.",
     {
-      containerName: z.string().describe("Container name to delete"),
+      containerName: z.string().describe("Name of the container to delete (e.g. 'my-data-2024')"),
     },
     async ({ containerName }) => {
       const client = getBlobServiceClient();
@@ -116,9 +116,9 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-container-exists",
-    "Check if a blob container exists",
+    "Check whether a blob container exists in the storage account. Use this to verify a container before attempting operations on it. Returns JSON with a boolean 'exists' field.",
     {
-      containerName: z.string().describe("Container name to check"),
+      containerName: z.string().describe("Name of the container to check (e.g. 'my-data-2024')"),
     },
     async ({ containerName }) => {
       const client = getBlobServiceClient();
@@ -136,19 +136,19 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-list",
-    "List blobs in a container, optionally filtered by directory prefix. Returns name, size, dates, content type, and custom metadata.",
+    "List blobs in a container, optionally filtered by a virtual directory prefix. Use this to browse container contents or find blobs under a specific path. Returns an array of objects with 'name', 'contentLength' (bytes), 'contentType', 'createdOn', 'lastModified', and optionally 'metadata' for each blob. Only blobs with size > 0 are included (empty marker blobs are excluded).",
     {
-      containerName: z.string().describe("Container name"),
+      containerName: z.string().describe("Name of the container to list blobs from (e.g. 'my-data-2024')"),
       directory: z
         .string()
         .optional()
         .default(".")
-        .describe("Directory prefix to filter by, or '.' for root"),
+        .describe("Virtual directory prefix to filter by (e.g. 'images/thumbnails/'), or '.' for the container root. Trailing slash is added automatically if missing."),
       includeMetadata: z
         .boolean()
         .optional()
         .default(true)
-        .describe("Include custom metadata in results"),
+        .describe("When true, includes custom metadata key-value pairs in each result object"),
     },
     async ({ containerName, directory, includeMetadata }) => {
       const client = getBlobServiceClient();
@@ -212,17 +212,17 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-create",
-    "Create or overwrite a blob. Content is provided as base64. Optionally attach custom metadata.",
+    "Upload a new blob or overwrite an existing blob in a container. Content must be base64-encoded — use 'util-to-base64' to encode text content first. The MIME content type is auto-detected from the file extension. Returns JSON with 'success', 'blobName', 'contentType', 'size' (bytes), and 'metadataSet' (count of metadata keys).",
     {
-      containerName: z.string().describe("Container name"),
+      containerName: z.string().describe("Name of the target container (e.g. 'my-data-2024')"),
       blobName: z
         .string()
-        .describe("Blob name including any virtual directory path"),
-      contentBase64: z.string().describe("File content as base64 string"),
+        .describe("Full blob name including any virtual directory path (e.g. 'reports/2024/q1-summary.pdf')"),
+      contentBase64: z.string().describe("File content encoded as a base64 string. Use 'util-to-base64' to convert text, or provide raw base64 for binary files."),
       metadata: z
         .record(z.string(), z.string())
         .optional()
-        .describe("Optional custom metadata key-value pairs"),
+        .describe("Optional custom metadata as key-value string pairs (e.g. {\"author\": \"Alice\", \"department\": \"Sales\"})"),
     },
     async ({ containerName, blobName, contentBase64, metadata }) => {
       const client = getBlobServiceClient();
@@ -259,20 +259,20 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-read",
-    "Read a blob and return its content as base64",
+    "Download a blob's content. By default returns base64-encoded content (use 'util-from-base64' to decode text). Alternatively, set returnUrl=true to get a time-limited SAS URL for direct browser/client access instead of the raw content. Returns JSON with 'blobName', 'contentType', 'size', and either 'contentBase64' or 'url' depending on mode.",
     {
-      containerName: z.string().describe("Container name"),
-      blobName: z.string().describe("Blob name including path"),
+      containerName: z.string().describe("Name of the container holding the blob (e.g. 'my-data-2024')"),
+      blobName: z.string().describe("Full blob name including virtual directory path (e.g. 'reports/2024/q1-summary.pdf')"),
       returnUrl: z
         .boolean()
         .optional()
         .default(false)
-        .describe("If true, return a SAS URL instead of base64 content"),
+        .describe("When true, returns a time-limited SAS URL for direct HTTP access instead of downloading the blob content as base64"),
       sasExpiryHours: z
         .number()
         .optional()
         .default(24)
-        .describe("SAS token expiry in hours (only used if returnUrl is true)"),
+        .describe("Hours until the SAS URL expires (only used when returnUrl=true, default: 24)"),
     },
     async ({ containerName, blobName, returnUrl, sasExpiryHours }) => {
       const client = getBlobServiceClient();
@@ -324,10 +324,10 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-delete",
-    "Delete a blob and its snapshots",
+    "Permanently delete a blob and all its snapshots from a container. WARNING: This is irreversible. Returns JSON with 'success' and the name of the deleted blob.",
     {
-      containerName: z.string().describe("Container name"),
-      blobName: z.string().describe("Blob name including path"),
+      containerName: z.string().describe("Name of the container holding the blob (e.g. 'my-data-2024')"),
+      blobName: z.string().describe("Full blob name including virtual directory path (e.g. 'reports/2024/q1-summary.pdf')"),
     },
     async ({ containerName, blobName }) => {
       const client = getBlobServiceClient();
@@ -347,13 +347,13 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-set-metadata",
-    "Set or update custom metadata on an existing blob",
+    "Set or replace all custom metadata on an existing blob. Note: this REPLACES all existing metadata — include any existing keys you want to keep. Use 'blob-list' with includeMetadata=true to read current metadata first. Returns JSON with 'success', 'blobName', and the list of metadata keys set.",
     {
-      containerName: z.string().describe("Container name"),
-      blobName: z.string().describe("Blob name"),
+      containerName: z.string().describe("Name of the container holding the blob (e.g. 'my-data-2024')"),
+      blobName: z.string().describe("Full blob name including virtual directory path (e.g. 'reports/2024/q1-summary.pdf')"),
       metadata: z
         .record(z.string(), z.string())
-        .describe("Metadata key-value pairs to set"),
+        .describe("Metadata key-value string pairs to set (e.g. {\"author\": \"Alice\", \"status\": \"reviewed\"}). Replaces ALL existing metadata."),
     },
     async ({ containerName, blobName, metadata }) => {
       const client = getBlobServiceClient();
@@ -381,20 +381,20 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-get-sas-url",
-    "Generate a SAS URL for a specific blob for instant access",
+    "Generate a time-limited SAS (Shared Access Signature) URL for a specific blob. Use this to grant temporary, scoped access to a blob without exposing storage account keys — ideal for sharing download links with external clients or embedding in web pages. Returns JSON with 'url' (the full SAS URL), 'sasToken', and 'expiresOn' (ISO 8601).",
     {
-      containerName: z.string().describe("Container name"),
-      blobName: z.string().describe("Blob name"),
+      containerName: z.string().describe("Name of the container holding the blob (e.g. 'my-data-2024')"),
+      blobName: z.string().describe("Full blob name including virtual directory path (e.g. 'reports/2024/q1-summary.pdf')"),
       expiryHours: z
         .number()
         .optional()
         .default(24)
-        .describe("Hours until SAS expires"),
+        .describe("Hours until the SAS token expires (default: 24)"),
       permissions: z
         .string()
         .optional()
         .default("r")
-        .describe("SAS permissions string (r=read, w=write, d=delete, l=list)"),
+        .describe("SAS permissions string — combine: r=read, w=write, d=delete, l=list (default: 'r')"),
     },
     async ({ containerName, blobName, expiryHours, permissions }) => {
       const sasToken = generateBlobSas(
@@ -421,15 +421,15 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-get-container-sas",
-    "Generate a SAS token for an entire container",
+    "Generate a time-limited SAS token scoped to an entire container. Use this when you need to grant temporary access to list and read all blobs in a container — for example, to connect a client application or run a batch process. Returns JSON with 'sasToken', 'connectionString' (ready-to-use), 'containerName', and 'expiresOn' (ISO 8601).",
     {
-      containerName: z.string().describe("Container name"),
-      expiryHours: z.number().optional().default(24).describe("Hours until SAS expires"),
+      containerName: z.string().describe("Name of the container to generate the SAS for (e.g. 'my-data-2024')"),
+      expiryHours: z.number().optional().default(24).describe("Hours until the SAS token expires (default: 24)"),
       permissions: z
         .string()
         .optional()
         .default("rl")
-        .describe("SAS permissions (r=read, l=list, w=write, d=delete)"),
+        .describe("SAS permissions string — combine: r=read, l=list, w=write, d=delete (default: 'rl')"),
     },
     async ({ containerName, expiryHours, permissions }) => {
       const expiresOn = new Date();

@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **41 tools** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **42 tools** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and Bicep infrastructure-as-code.
 
@@ -8,7 +8,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and 
 
 ## Features
 
-- **41 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **42 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
 - **Dual-mode transport** — stateful sessions for MCP clients + stateless one-shot for HTTP testing
 - **API key authentication** with constant-time comparison (X-API-Key header or Bearer token)
 - **Rate limiting** — configurable per-IP request limits
@@ -43,7 +43,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and 
                         ┌───────┐ ┌───────┐ ┌─────────┐ ┌─────────┐ ┌───────┐
                         │ Blob  │ │ Queue │ │  Table  │ │  File   │ │ Util  │
                         │ Tools │ │ Tools │ │  Tools  │ │  Share  │ │ Tools │
-                        │ (11)  │ │  (8)  │ │   (7)   │ │   (9)   │ │  (6)  │
+                        │ (11)  │ │  (8)  │ │   (7)   │ │  (10)   │ │  (6)  │
                         └───┬───┘ └───┬───┘ └────┬────┘ └────┬────┘ └───┬───┘
                             │         │          │           │         │
                             └─────────┴──────────┴───────────┴─────────┘
@@ -93,67 +93,68 @@ mcp-azure-storage/
 
 | Tool | Description |
 |------|-------------|
-| `blob-container-list` | List all blob containers |
-| `blob-container-create` | Create a container if it doesn't exist |
-| `blob-container-delete` | Delete a container |
-| `blob-container-exists` | Check if a container exists |
-| `blob-list` | List blobs with optional prefix filter & metadata |
-| `blob-create` | Upload a blob (base64 content + optional metadata) |
-| `blob-read` | Download blob content as base64 |
-| `blob-delete` | Delete a blob |
-| `blob-set-metadata` | Set custom metadata on a blob |
-| `blob-get-sas-url` | Generate a SAS URL for a specific blob |
-| `blob-get-container-sas` | Generate a SAS token for an entire container |
+| `blob-container-list` | List all blob containers with names and last-modified dates. Use to discover available containers. |
+| `blob-container-create` | Create a blob container (idempotent). Use before uploading blobs to a new container. Use `util-to-container-name` to sanitise free-form text into a valid name. |
+| `blob-container-delete` | **Destructive** — permanently delete a container and ALL blobs inside it. Verify with `blob-container-exists` first. |
+| `blob-container-exists` | Check whether a container exists. Returns `{ exists: true/false }`. |
+| `blob-list` | List blobs in a container, optionally filtered by virtual directory prefix. Returns name, size, content type, dates, and optional metadata. |
+| `blob-create` | Upload or overwrite a blob (base64 content). MIME type is auto-detected from extension. Use `util-to-base64` to encode text first. |
+| `blob-read` | Download blob content as base64, or set `returnUrl=true` to get a time-limited SAS URL instead. Use `util-from-base64` to decode text. |
+| `blob-delete` | **Destructive** — permanently delete a blob and its snapshots. |
+| `blob-set-metadata` | Replace all custom metadata on a blob. Include existing keys you want to keep — this is a full replacement. |
+| `blob-get-sas-url` | Generate a time-limited SAS URL for a specific blob. Use to grant temporary access without exposing account keys. |
+| `blob-get-container-sas` | Generate a time-limited SAS token for an entire container. Returns both the token and a ready-to-use connection string. |
 
 ### Queue Storage (8 tools)
 
 | Tool | Description |
 |------|-------------|
-| `queue-list` | List all queues |
-| `queue-create` | Create a queue if it doesn't exist |
-| `queue-delete` | Delete a queue |
-| `queue-send-message` | Send a message with optional TTL |
-| `queue-peek-messages` | Peek at messages without removing them |
-| `queue-receive-messages` | Receive and dequeue messages |
-| `queue-delete-message` | Delete a specific message by ID + pop receipt |
-| `queue-get-properties` | Get queue properties (approx. message count) |
+| `queue-list` | List all queue names in the storage account. |
+| `queue-create` | Create a queue (idempotent). Use before sending messages to a new queue. |
+| `queue-delete` | **Destructive** — permanently delete a queue and ALL pending messages. Check `queue-get-properties` first. |
+| `queue-send-message` | Send a text message to a queue with optional TTL. For structured data, serialise as JSON string. |
+| `queue-peek-messages` | Preview messages at the front of a queue WITHOUT removing them. Messages stay visible to other receivers. |
+| `queue-receive-messages` | Receive and hide messages for processing. Call `queue-delete-message` after processing to permanently remove each message. |
+| `queue-delete-message` | Permanently remove a processed message. Requires `messageId` + `popReceipt` from `queue-receive-messages`. |
+| `queue-get-properties` | Get queue properties including approximate pending message count. |
 
 ### Table Storage (7 tools)
 
 | Tool | Description |
 |------|-------------|
-| `table-list` | List all tables |
-| `table-create` | Create a table if it doesn't exist |
-| `table-delete` | Delete a table |
-| `table-entity-upsert` | Insert or merge an entity — pass `partitionKey`, `rowKey`, and a flat `entity` JSON object (`{"name": "Alice", "score": 95}`) |
-| `table-entity-get` | Get entity by partition key + row key |
-| `table-entity-query` | Query entities with OData filter |
-| `table-entity-delete` | Delete an entity |
+| `table-list` | List all table names in the storage account. |
+| `table-create` | Create a table (idempotent). Use before upserting entities to a new table. |
+| `table-delete` | **Destructive** — permanently delete a table and ALL entities. |
+| `table-entity-upsert` | Insert or merge-update an entity. Pass `partitionKey`, `rowKey`, and a flat `entity` JSON object (`{"name": "Alice", "score": 95}`). Merge preserves existing properties not in the request. |
+| `table-entity-get` | Get a single entity by exact partition key + row key (fastest lookup). |
+| `table-entity-query` | Query entities with an OData filter (e.g. `PartitionKey eq 'sales'`). Omit the filter to return all rows up to the limit. |
+| `table-entity-delete` | **Destructive** — permanently delete a single entity by partition key + row key. |
 
-### File Share (9 tools)
+### File Share (10 tools)
 
 | Tool | Description |
 |------|-------------|
-| `fileshare-list-shares` | List all file shares |
-| `fileshare-create-share` | Create a file share |
-| `fileshare-delete-share` | Delete a file share |
-| `fileshare-create-directory` | Create nested directories |
-| `fileshare-delete-directory` | Delete a directory (must be empty) |
-| `fileshare-list` | List files and subdirectories |
-| `fileshare-upload-file` | Upload a file (base64 content) |
-| `fileshare-read-file` | Download file content as base64 |
-| `fileshare-delete-file` | Delete a file |
+| `fileshare-list-shares` | List all file shares with names and properties (quota, last modified). |
+| `fileshare-create-share` | Create a file share (idempotent). Use before uploading files to a new share. |
+| `fileshare-delete-share` | **Destructive** — permanently delete a share and ALL files/directories inside it. |
+| `fileshare-create-directory` | Create a directory and any missing parents (idempotent). Or let `fileshare-upload-file` auto-create directories. |
+| `fileshare-delete-directory` | Delete a directory (must be empty — remove all contents first). Use `fileshare-list` to check. |
+| `fileshare-list` | List files and subdirectories in a directory. Returns name, kind (`file`/`directory`), size, and last-modified. |
+| `fileshare-upload-file` | Upload a file (base64 content). Auto-creates parent directories. Use `util-to-base64` to encode text first. |
+| `fileshare-read-file` | Download file content as base64. Use `util-from-base64` to decode text. |
+| `fileshare-delete-file` | **Destructive** — permanently delete a file from a share. |
+| `fileshare-get-file-properties` | Get file properties (size, content type, timestamps, metadata) without downloading the content. |
 
 ### Utilities (6 tools)
 
 | Tool | Description |
 |------|-------------|
-| `util-to-base64` | Encode text to base64 |
-| `util-from-base64` | Decode base64 to text |
-| `util-refresh-blob-sas` | Generate a fresh SAS token for a blob |
-| `util-refresh-container-sas` | Generate a fresh SAS token for a container |
-| `util-get-content-type` | MIME type lookup by file name/extension |
-| `util-to-container-name` | Convert arbitrary text (email, URL, etc.) to a valid container name |
+| `util-to-base64` | Encode text to base64. Use BEFORE `blob-create` or `fileshare-upload-file` for text content. |
+| `util-from-base64` | Decode base64 to text. Use AFTER `blob-read` or `fileshare-read-file` for text content. Not suitable for binary files. |
+| `util-refresh-blob-sas` | Generate a fresh SAS URL for a specific blob. Use to replace an expired SAS URL. |
+| `util-refresh-container-sas` | Generate a fresh SAS token + connection string for a container. Use to replace an expired container SAS. |
+| `util-get-content-type` | MIME type lookup by file name or extension. Returns `application/octet-stream` for unrecognised types. |
+| `util-to-container-name` | Sanitise arbitrary text (email, URL, display name) into a valid Azure container name. Use BEFORE `blob-container-create`. |
 
 ---
 
@@ -349,6 +350,62 @@ curl -X POST https://<your-app>.azurecontainerapps.io/mcp \
   -H "X-API-Key: <your-production-key>" \
   -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}'
 ```
+
+### 6. Check deployment status
+
+Use `azd show` to view the current state of all provisioned resources and service endpoints:
+
+```bash
+azd show
+```
+
+To see detailed provisioning output or diagnose issues, review the last deployment operation:
+
+```bash
+azd provision --preview
+```
+
+You can also check the Container App's live status directly via the Azure CLI:
+
+```bash
+az containerapp show \
+  --name <your-app-name> \
+  --resource-group <your-resource-group> \
+  --query "{status:properties.runningStatus, fqdn:properties.configuration.ingress.fqdn}" \
+  -o table
+```
+
+### 7. Redeploy after code changes
+
+After modifying source code, rebuild and redeploy the container with:
+
+```bash
+azd deploy
+```
+
+This rebuilds the Docker image, pushes it to the Azure Container Registry, and updates the Container App — without re-provisioning infrastructure.
+
+If you have also changed the Bicep infrastructure files (e.g. `infra/main.bicep`), run the full provision-and-deploy cycle instead:
+
+```bash
+azd up
+```
+
+### 8. Tear down the deployment
+
+To delete **all** Azure resources created by `azd up` (Resource Group, Container App, Storage Account, Container Registry, etc.):
+
+```bash
+azd down
+```
+
+Add the `--purge` flag to also purge any soft-deleted resources (e.g. Key Vault) so the names can be reused immediately:
+
+```bash
+azd down --purge
+```
+
+> **Warning:** `azd down` is destructive. All data in the provisioned Storage Account will be permanently lost.
 
 ---
 

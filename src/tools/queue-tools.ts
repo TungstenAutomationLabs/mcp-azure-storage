@@ -22,7 +22,7 @@ export function registerQueueTools(server: McpServer): void {
 
   // ── QUEUE MANAGEMENT ──
 
-  server.tool("queue-list", "List all queues in the storage account", {}, async () => {
+  server.tool("queue-list", "List all queues in the storage account. Use this to discover available queues before sending or receiving messages. Returns a JSON array of queue name strings.", {}, async () => {
     const client = getQueueServiceClient();
     const queues: string[] = [];
     for await (const queue of client.listQueues()) {
@@ -35,8 +35,8 @@ export function registerQueueTools(server: McpServer): void {
 
   server.tool(
     "queue-create",
-    "Create a queue if it doesn't exist",
-    { queueName: z.string().describe("Queue name") },
+    "Create a new queue if it doesn't already exist. Idempotent — safe to call even if the queue already exists. Use this before sending messages to a new queue.",
+    { queueName: z.string().describe("Queue name (lowercase letters, digits, and hyphens, 3-63 chars, e.g. 'order-processing')") },
     async ({ queueName }) => {
       const client = getQueueServiceClient();
       const queueClient = client.getQueueClient(queueName);
@@ -49,8 +49,8 @@ export function registerQueueTools(server: McpServer): void {
 
   server.tool(
     "queue-delete",
-    "Delete a queue",
-    { queueName: z.string().describe("Queue name") },
+    "Permanently delete a queue and ALL messages in it. WARNING: This is irreversible — all pending messages will be lost. Use 'queue-get-properties' to check the message count before deleting.",
+    { queueName: z.string().describe("Name of the queue to delete (e.g. 'order-processing')") },
     async ({ queueName }) => {
       const client = getQueueServiceClient();
       const queueClient = client.getQueueClient(queueName);
@@ -65,15 +65,15 @@ export function registerQueueTools(server: McpServer): void {
 
   server.tool(
     "queue-send-message",
-    "Send a message to a queue",
+    "Send a text message to a queue for asynchronous processing. The message becomes visible to receivers immediately. Returns JSON with 'messageId' and 'expiresOn'. For structured data, serialise to JSON string before sending.",
     {
-      queueName: z.string().describe("Queue name"),
-      message: z.string().describe("Message text"),
+      queueName: z.string().describe("Name of the target queue (e.g. 'order-processing')"),
+      message: z.string().describe("Message body as a text string (max 64 KB). For structured data, serialise as JSON string first."),
       ttlSeconds: z
         .number()
         .optional()
         .default(-1)
-        .describe("Time-to-live in seconds (-1 = never expires)"),
+        .describe("Time-to-live in seconds before the message auto-expires. Use -1 for no expiry (default), or a positive value like 3600 for 1 hour."),
     },
     async ({ queueName, message, ttlSeconds }) => {
       const client = getQueueServiceClient();
@@ -98,10 +98,10 @@ export function registerQueueTools(server: McpServer): void {
 
   server.tool(
     "queue-peek-messages",
-    "Peek at messages without removing them",
+    "Preview messages at the front of a queue WITHOUT removing or hiding them. Use this to inspect queue contents without affecting processing. Messages remain visible to other receivers. Returns an array of objects with 'messageId', 'messageText', 'insertedOn', 'expiresOn', and 'dequeueCount'.",
     {
-      queueName: z.string().describe("Queue name"),
-      count: z.number().optional().default(5).describe("Number of messages to peek (max 32)"),
+      queueName: z.string().describe("Name of the queue to peek into (e.g. 'order-processing')"),
+      count: z.number().optional().default(5).describe("Number of messages to peek at (1-32, default: 5)"),
     },
     async ({ queueName, count }) => {
       const client = getQueueServiceClient();
@@ -122,15 +122,15 @@ export function registerQueueTools(server: McpServer): void {
 
   server.tool(
     "queue-receive-messages",
-    "Receive and dequeue messages (removes them from the queue)",
+    "Receive messages from a queue for processing. Received messages become invisible to other receivers for the visibility timeout period. IMPORTANT: After processing each message, call 'queue-delete-message' with the returned 'messageId' and 'popReceipt' to permanently remove it. If not deleted within the visibility timeout, the message reappears in the queue for retry. Returns an array of objects with 'messageId', 'popReceipt', 'messageText', and 'dequeueCount'.",
     {
-      queueName: z.string().describe("Queue name"),
-      count: z.number().optional().default(1).describe("Number of messages (max 32)"),
+      queueName: z.string().describe("Name of the queue to receive from (e.g. 'order-processing')"),
+      count: z.number().optional().default(1).describe("Number of messages to receive (1-32, default: 1)"),
       visibilityTimeoutSeconds: z
         .number()
         .optional()
         .default(30)
-        .describe("Seconds before message becomes visible again if not deleted"),
+        .describe("Seconds the message stays hidden from other receivers while you process it (default: 30). Set higher for long-running tasks."),
     },
     async ({ queueName, count, visibilityTimeoutSeconds }) => {
       const client = getQueueServiceClient();
@@ -153,11 +153,11 @@ export function registerQueueTools(server: McpServer): void {
 
   server.tool(
     "queue-delete-message",
-    "Delete a specific message from a queue (after receiving it)",
+    "Permanently delete a specific message from a queue after it has been processed. This completes the receive→process→delete workflow. Both 'messageId' and 'popReceipt' are obtained from the 'queue-receive-messages' response. Returns JSON with 'success' and 'deletedMessageId'.",
     {
-      queueName: z.string().describe("Queue name"),
-      messageId: z.string().describe("Message ID from receive"),
-      popReceipt: z.string().describe("Pop receipt from receive"),
+      queueName: z.string().describe("Name of the queue containing the message (e.g. 'order-processing')"),
+      messageId: z.string().describe("Message ID returned by 'queue-receive-messages' (e.g. '2f43b...')"),
+      popReceipt: z.string().describe("Pop receipt returned by 'queue-receive-messages' — required to prove this receiver owns the message lock"),
     },
     async ({ queueName, messageId, popReceipt }) => {
       const client = getQueueServiceClient();
@@ -176,8 +176,8 @@ export function registerQueueTools(server: McpServer): void {
 
   server.tool(
     "queue-get-properties",
-    "Get queue properties including approximate message count",
-    { queueName: z.string().describe("Queue name") },
+    "Get properties for a queue, including the approximate number of pending messages. Use this to check queue depth before processing or to monitor backlog. Returns JSON with 'queueName' and 'approximateMessagesCount'. Note: the count is approximate due to Azure's distributed architecture.",
+    { queueName: z.string().describe("Name of the queue to inspect (e.g. 'order-processing')") },
     async ({ queueName }) => {
       const client = getQueueServiceClient();
       const queueClient = client.getQueueClient(queueName);

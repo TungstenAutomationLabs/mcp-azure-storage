@@ -16,14 +16,14 @@ export function registerUtilityTools(server: McpServer): void {
 
   server.tool(
     "util-to-base64",
-    "Convert a text string (e.g. HTML document, JSON, plain text) to base64 encoding",
+    "Encode a text string to base64. Use this BEFORE 'blob-create' or 'fileshare-upload-file' to convert text content (HTML, JSON, CSV, plain text, etc.) into the required base64 format. Returns JSON with 'base64' (the encoded string), 'originalLength', and 'base64Length'.",
     {
-      text: z.string().describe("The text content to encode as base64"),
+      text: z.string().describe("The text content to encode (e.g. an HTML document, JSON payload, or CSV data)"),
       encoding: z
         .enum(["utf-8", "ascii", "latin1"])
         .optional()
         .default("utf-8")
-        .describe("Source text encoding"),
+        .describe("Character encoding of the source text (default: 'utf-8')"),
     },
     async ({ text, encoding }) => {
       const base64 = Buffer.from(text, encoding as BufferEncoding).toString(
@@ -46,14 +46,14 @@ export function registerUtilityTools(server: McpServer): void {
 
   server.tool(
     "util-from-base64",
-    "Decode a base64 string back to text (e.g. to read an HTML document or JSON from blob storage)",
+    "Decode a base64 string back to readable text. Use this AFTER 'blob-read' or 'fileshare-read-file' to convert the returned 'contentBase64' field into human-readable text (HTML, JSON, CSV, etc.). Not suitable for binary files (images, PDFs). Returns JSON with 'text' (the decoded content), 'base64Length', and 'decodedLength'.",
     {
-      base64: z.string().describe("The base64 encoded string to decode"),
+      base64: z.string().describe("The base64-encoded string to decode (e.g. the 'contentBase64' value from 'blob-read')"),
       encoding: z
         .enum(["utf-8", "ascii", "latin1"])
         .optional()
         .default("utf-8")
-        .describe("Target text encoding"),
+        .describe("Target character encoding for the decoded text (default: 'utf-8')"),
     },
     async ({ base64, encoding }) => {
       const text = Buffer.from(base64, "base64").toString(
@@ -78,20 +78,20 @@ export function registerUtilityTools(server: McpServer): void {
 
   server.tool(
     "util-refresh-blob-sas",
-    "Generate a fresh SAS token for a specific blob. Use this to refresh an expired SAS URL.",
+    "Generate a fresh SAS (Shared Access Signature) URL for a specific blob. Use this to replace an expired SAS URL, or as a standalone alternative to 'blob-get-sas-url'. Returns JSON with 'url' (the full SAS URL), 'sasToken', 'expiresOn' (ISO 8601), and 'permissions'.",
     {
-      containerName: z.string().describe("Container name"),
-      blobName: z.string().describe("Blob name including path"),
+      containerName: z.string().describe("Name of the container holding the blob (e.g. 'my-data-2024')"),
+      blobName: z.string().describe("Full blob name including virtual directory path (e.g. 'reports/2024/q1-summary.pdf')"),
       expiryHours: z
         .number()
         .optional()
         .default(24)
-        .describe("Hours until the new SAS expires"),
+        .describe("Hours until the new SAS token expires (default: 24)"),
       permissions: z
         .string()
         .optional()
         .default("r")
-        .describe("SAS permissions (r=read, w=write, d=delete, l=list)"),
+        .describe("SAS permissions string — combine: r=read, w=write, d=delete, l=list (default: 'r')"),
     },
     async ({ containerName, blobName, expiryHours, permissions }) => {
       const credential = new StorageSharedKeyCredential(
@@ -133,19 +133,19 @@ export function registerUtilityTools(server: McpServer): void {
 
   server.tool(
     "util-refresh-container-sas",
-    "Generate a fresh SAS token for an entire container. Returns both the token and a connection string.",
+    "Generate a fresh SAS token scoped to an entire container. Use this to replace an expired container SAS, or as a standalone alternative to 'blob-get-container-sas'. Returns JSON with 'containerName', 'sasToken', 'connectionString' (ready-to-use for Azure SDK clients), 'expiresOn' (ISO 8601), and 'permissions'.",
     {
-      containerName: z.string().describe("Container name"),
+      containerName: z.string().describe("Name of the container to generate the SAS for (e.g. 'my-data-2024')"),
       expiryHours: z
         .number()
         .optional()
         .default(24)
-        .describe("Hours until the new SAS expires"),
+        .describe("Hours until the new SAS token expires (default: 24)"),
       permissions: z
         .string()
         .optional()
         .default("rl")
-        .describe("SAS permissions (r=read, l=list, w=write, d=delete)"),
+        .describe("SAS permissions string — combine: r=read, l=list, w=write, d=delete (default: 'rl')"),
     },
     async ({ containerName, expiryHours, permissions }) => {
       const credential = new StorageSharedKeyCredential(
@@ -189,11 +189,11 @@ export function registerUtilityTools(server: McpServer): void {
 
   server.tool(
     "util-get-content-type",
-    "Look up the MIME content type for a given file name or extension",
+    "Look up the MIME content type for a file name or extension. Use this to determine the correct Content-Type header before uploading, or to identify a downloaded file's format. Returns JSON with 'fileName' and 'contentType'. Returns 'application/octet-stream' for unrecognised extensions.",
     {
       fileName: z
         .string()
-        .describe("File name or extension (e.g. 'report.pdf' or 'pdf')"),
+        .describe("File name (e.g. 'report.pdf') or bare extension (e.g. 'pdf') to look up"),
     },
     async ({ fileName }) => {
       const contentType = determineContentType(fileName);
@@ -212,21 +212,22 @@ export function registerUtilityTools(server: McpServer): void {
 
   server.tool(
     "util-to-container-name",
-    "Convert arbitrary text (e.g. an email address, display name, URL) into a valid Azure Storage container name. " +
-      "Rules enforced: 3-63 chars, lowercase alphanumeric + hyphens only, no leading/trailing/consecutive hyphens.",
+    "Convert arbitrary text into a valid Azure Storage container name. Use this BEFORE 'blob-container-create' when the container name comes from user input, email addresses, URLs, or other free-form text. " +
+      "Applies Azure naming rules: 3-63 chars, lowercase alphanumeric + hyphens only, no leading/trailing/consecutive hyphens. " +
+      "Common characters like @, ., and _ are replaced with hyphens. Returns JSON with 'input' and the sanitised 'containerName'.",
     {
       input: z
         .string()
-        .describe("The raw string to convert (e.g. 'Tom.Coppock@example.com')"),
+        .describe("The raw string to convert (e.g. 'Tom.Coppock@example.com', 'My Project 2024!', 'https://example.com/path')"),
       prefix: z
         .string()
         .optional()
-        .describe("Optional prefix to prepend (e.g. 'user-' → 'user-tomcoppock')"),
+        .describe("Optional prefix to prepend to the result (e.g. 'user-' → 'user-tom-coppock-example-com')"),
       maxLength: z
         .number()
         .optional()
         .default(63)
-        .describe("Max length of the result (3-63, default 63)"),
+        .describe("Maximum length of the resulting name (3-63, default: 63)"),
     },
     async ({ input, prefix, maxLength }) => {
       const name = toContainerName(input, prefix, maxLength);

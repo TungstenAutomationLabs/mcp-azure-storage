@@ -24,7 +24,7 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-list-shares",
-    "List all file shares in the storage account",
+    "List all Azure file shares in the storage account. Use this to discover available shares before performing file operations. Returns an array of objects with 'name' and 'properties' (quota, last modified, etc.) for each share.",
     {},
     async () => {
       const client = getShareServiceClient();
@@ -43,9 +43,9 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-create-share",
-    "Create a file share if it doesn't exist",
+    "Create a new Azure file share if it doesn't already exist. Idempotent — safe to call even if the share already exists. Use this before uploading files to a new share.",
     {
-      shareName: z.string().describe("File share name"),
+      shareName: z.string().describe("File share name (lowercase letters, digits, and hyphens, 3-63 chars, e.g. 'project-documents')"),
     },
     async ({ shareName }) => {
       const client = getShareServiceClient();
@@ -69,9 +69,9 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-delete-share",
-    "Delete a file share",
+    "Permanently delete a file share and ALL files and directories inside it. WARNING: This is irreversible — all data in the share will be lost.",
     {
-      shareName: z.string().describe("File share name to delete"),
+      shareName: z.string().describe("Name of the file share to delete (e.g. 'project-documents')"),
     },
     async ({ shareName }) => {
       const client = getShareServiceClient();
@@ -89,12 +89,12 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-create-directory",
-    "Create a directory within a file share (creates parent directories if needed)",
+    "Create a directory (and any missing parent directories) within a file share. Idempotent — existing directories are skipped. Use this to set up a folder structure before uploading files, or let 'fileshare-upload-file' auto-create directories on demand.",
     {
-      shareName: z.string().describe("File share name"),
+      shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
       directoryPath: z
         .string()
-        .describe("Directory path to create (e.g. 'reports/2024/q1')"),
+        .describe("Forward-slash-separated directory path to create, including any nested levels (e.g. 'reports/2024/q1')"),
     },
     async ({ shareName, directoryPath }) => {
       const client = getShareServiceClient();
@@ -129,10 +129,10 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-delete-directory",
-    "Delete a directory (must be empty)",
+    "Delete a directory from a file share. The directory MUST be empty — delete all files and subdirectories inside it first, or the operation will fail. Use 'fileshare-list' to check contents before deleting.",
     {
-      shareName: z.string().describe("File share name"),
-      directoryPath: z.string().describe("Directory path to delete"),
+      shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
+      directoryPath: z.string().describe("Path of the directory to delete (e.g. 'reports/2024/q1')"),
     },
     async ({ shareName, directoryPath }) => {
       const client = getShareServiceClient();
@@ -155,14 +155,14 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-list",
-    "List files and subdirectories in a file share directory",
+    "List all files and subdirectories within a directory of a file share. Use this to browse share contents or verify files exist before reading/deleting. Returns JSON with 'shareName', 'directoryPath', and 'items' — each item has 'name', 'kind' ('file' or 'directory'), and for files: 'contentLength' (bytes) and 'lastModified'.",
     {
-      shareName: z.string().describe("File share name"),
+      shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
       directoryPath: z
         .string()
         .optional()
         .default("")
-        .describe("Directory path, or empty string for root"),
+        .describe("Directory path to list (e.g. 'reports/2024'), or empty string for the share root"),
     },
     async ({ shareName, directoryPath }) => {
       const client = getShareServiceClient();
@@ -211,14 +211,14 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-upload-file",
-    "Upload a file to a file share. Content is provided as base64. Directory is created if it doesn't exist.",
+    "Upload a file to a directory in a file share. Content must be base64-encoded — use 'util-to-base64' to encode text content first. Automatically creates parent directories if they don't exist. Overwrites the file if it already exists. Returns JSON with 'success', 'shareName', 'directoryPath', 'fileName', and 'size' (bytes).",
     {
-      shareName: z.string().describe("File share name"),
+      shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
       directoryPath: z
         .string()
-        .describe("Directory path, or '.' for root"),
-      fileName: z.string().describe("File name with extension"),
-      contentBase64: z.string().describe("File content as base64 string"),
+        .describe("Target directory path (e.g. 'reports/2024'), or '.' for the share root"),
+      fileName: z.string().describe("File name with extension (e.g. 'q1-summary.pdf')"),
+      contentBase64: z.string().describe("File content encoded as a base64 string. Use 'util-to-base64' to convert text, or provide raw base64 for binary files."),
     },
     async ({ shareName, directoryPath, fileName, contentBase64 }) => {
       const client = getShareServiceClient();
@@ -272,13 +272,13 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-read-file",
-    "Read a file from a file share and return its content as base64",
+    "Download a file from a file share and return its content as base64. Use 'util-from-base64' to decode text content after downloading. Returns JSON with 'shareName', 'directoryPath', 'fileName', 'size' (bytes), 'contentType', and 'contentBase64'.",
     {
-      shareName: z.string().describe("File share name"),
+      shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
       directoryPath: z
         .string()
-        .describe("Directory path, or '.' for root"),
-      fileName: z.string().describe("File name to read"),
+        .describe("Directory containing the file (e.g. 'reports/2024'), or '.' for the share root"),
+      fileName: z.string().describe("Name of the file to read (e.g. 'q1-summary.pdf')"),
     },
     async ({ shareName, directoryPath, fileName }) => {
       const client = getShareServiceClient();
@@ -315,13 +315,13 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-delete-file",
-    "Delete a file from a file share",
+    "Permanently delete a file from a file share. WARNING: This is irreversible. Returns JSON with 'success' and the full path of the deleted file.",
     {
-      shareName: z.string().describe("File share name"),
+      shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
       directoryPath: z
         .string()
-        .describe("Directory path, or '.' for root"),
-      fileName: z.string().describe("File name to delete"),
+        .describe("Directory containing the file (e.g. 'reports/2024'), or '.' for the share root"),
+      fileName: z.string().describe("Name of the file to delete (e.g. 'q1-summary.pdf')"),
     },
     async ({ shareName, directoryPath, fileName }) => {
       const client = getShareServiceClient();
@@ -351,13 +351,13 @@ export function registerFileShareTools(server: McpServer): void {
 
   server.tool(
     "fileshare-get-file-properties",
-    "Get properties and metadata for a file",
+    "Get detailed properties and metadata for a specific file in a file share without downloading its content. Use this to check file size, content type, timestamps, and custom metadata. Returns JSON with 'fileName', 'contentLength' (bytes), 'contentType', 'lastModified', 'createdOn', and 'metadata'.",
     {
-      shareName: z.string().describe("File share name"),
+      shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
       directoryPath: z
         .string()
-        .describe("Directory path, or '.' for root"),
-      fileName: z.string().describe("File name"),
+        .describe("Directory containing the file (e.g. 'reports/2024'), or '.' for the share root"),
+      fileName: z.string().describe("Name of the file to inspect (e.g. 'q1-summary.pdf')"),
     },
     async ({ shareName, directoryPath, fileName }) => {
       const client = getShareServiceClient();
