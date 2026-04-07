@@ -129,14 +129,15 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         transport: 'http'        // Container speaks plain HTTP; the platform terminates TLS
       }
       // ── Registry ──
-      // Pull images from our private ACR using the app's managed identity
-      // (no admin credentials needed — see AcrPull role assignment below).
-      registries: [
-        {
-          server: containerRegistry.properties.loginServer
-          identity: 'system'
-        }
-      ]
+      // Note: The ACR registry configuration is NOT included here intentionally.
+      // During `azd provision`, the Container App starts with a public placeholder
+      // image (mcr.microsoft.com/k8se/quickstart). If we configure the private ACR
+      // here, provisioning fails because the AcrPull role assignment (below) has a
+      // circular dependency — it needs the Container App's principalId, which only
+      // exists after successful creation.
+      //
+      // azd automatically configures the ACR registry during `azd deploy` (the
+      // second phase of `azd up`), after the AcrPull role is in place.
       // ── Secrets ──
       // Secrets are encrypted at rest and injected as env vars via secretRef.
       // They are NOT exposed in template definitions or Azure Portal UI.
