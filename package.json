@@ -1,15 +1,18 @@
 {
   "name": "mcp-azure-storage",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "MCP server for Azure Storage — Blob, Queue, Table, and File Share",
+  "main": "dist/server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": ["mcp", "azure", "storage", "blob", "queue", "table", "fileshare"],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -28,7 +31,6 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^25.5.0",
-    "nodemo": "^1.0.0",
     "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",

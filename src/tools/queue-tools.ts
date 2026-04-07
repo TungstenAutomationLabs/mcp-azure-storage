@@ -9,21 +9,20 @@ import { getStorageConfig } from "../config.js";
 export function registerQueueTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  function getQueueServiceClient(): QueueServiceClient {
-    const credential = new StorageSharedKeyCredential(
-      config.accountName,
-      config.accountKey
-    );
-    return new QueueServiceClient(
-      `https://${config.accountName}.queue.core.windows.net`,
-      credential
-    );
-  }
+  // ── Singleton client — reuses internal connection pool across all tool calls ──
+  const credential = new StorageSharedKeyCredential(
+    config.accountName,
+    config.accountKey
+  );
+  const queueServiceClient = new QueueServiceClient(
+    `https://${config.accountName}.queue.core.windows.net`,
+    credential
+  );
 
   // ── QUEUE MANAGEMENT ──
 
   server.tool("queue-list", "List all queues in the storage account. Use this to discover available queues before sending or receiving messages. Returns a JSON array of queue name strings.", {}, async () => {
-    const client = getQueueServiceClient();
+    const client = queueServiceClient;
     const queues: string[] = [];
     for await (const queue of client.listQueues()) {
       queues.push(queue.name);
@@ -38,7 +37,7 @@ export function registerQueueTools(server: McpServer): void {
     "Create a new queue if it doesn't already exist. Idempotent — safe to call even if the queue already exists. Use this before sending messages to a new queue.",
     { queueName: z.string().describe("Queue name (lowercase letters, digits, and hyphens, 3-63 chars, e.g. 'order-processing')") },
     async ({ queueName }) => {
-      const client = getQueueServiceClient();
+      const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       await queueClient.createIfNotExists();
       return {
@@ -52,7 +51,7 @@ export function registerQueueTools(server: McpServer): void {
     "Permanently delete a queue and ALL messages in it. WARNING: This is irreversible — all pending messages will be lost. Use 'queue-get-properties' to check the message count before deleting.",
     { queueName: z.string().describe("Name of the queue to delete (e.g. 'order-processing')") },
     async ({ queueName }) => {
-      const client = getQueueServiceClient();
+      const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       await queueClient.delete();
       return {
@@ -76,7 +75,7 @@ export function registerQueueTools(server: McpServer): void {
         .describe("Time-to-live in seconds before the message auto-expires. Use -1 for no expiry (default), or a positive value like 3600 for 1 hour."),
     },
     async ({ queueName, message, ttlSeconds }) => {
-      const client = getQueueServiceClient();
+      const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       const result = await queueClient.sendMessage(message, {
         messageTimeToLive: ttlSeconds,
@@ -104,7 +103,7 @@ export function registerQueueTools(server: McpServer): void {
       count: z.number().optional().default(5).describe("Number of messages to peek at (1-32, default: 5)"),
     },
     async ({ queueName, count }) => {
-      const client = getQueueServiceClient();
+      const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       const response = await queueClient.peekMessages({ numberOfMessages: Math.min(count, 32) });
       const messages = response.peekedMessageItems.map((m) => ({
@@ -133,7 +132,7 @@ export function registerQueueTools(server: McpServer): void {
         .describe("Seconds the message stays hidden from other receivers while you process it (default: 30). Set higher for long-running tasks."),
     },
     async ({ queueName, count, visibilityTimeoutSeconds }) => {
-      const client = getQueueServiceClient();
+      const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       const response = await queueClient.receiveMessages({
         numberOfMessages: Math.min(count, 32),
@@ -160,7 +159,7 @@ export function registerQueueTools(server: McpServer): void {
       popReceipt: z.string().describe("Pop receipt returned by 'queue-receive-messages' — required to prove this receiver owns the message lock"),
     },
     async ({ queueName, messageId, popReceipt }) => {
-      const client = getQueueServiceClient();
+      const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       await queueClient.deleteMessage(messageId, popReceipt);
       return {
@@ -179,7 +178,7 @@ export function registerQueueTools(server: McpServer): void {
     "Get properties for a queue, including the approximate number of pending messages. Use this to check queue depth before processing or to monitor backlog. Returns JSON with 'queueName' and 'approximateMessagesCount'. Note: the count is approximate due to Azure's distributed architecture.",
     { queueName: z.string().describe("Name of the queue to inspect (e.g. 'order-processing')") },
     async ({ queueName }) => {
-      const client = getQueueServiceClient();
+      const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       const props = await queueClient.getProperties();
       return {

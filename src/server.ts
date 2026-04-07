@@ -55,6 +55,7 @@ function createMcpServer(): McpServer {
 
 // ── Session management for stateful mode ──
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || "100", 10);
 
 interface ManagedSession {
   transport: StreamableHTTPServerTransport;
@@ -65,7 +66,7 @@ interface ManagedSession {
 const sessions = new Map<string, ManagedSession>();
 
 // ── Session cleanup interval — evict stale sessions every 5 minutes ──
-setInterval(() => {
+const sessionCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [sid, session] of sessions) {
     if (now - session.lastActivity > SESSION_TTL_MS) {
@@ -109,6 +110,18 @@ app.post("/mcp", async (req: Request, res: Response) => {
     (Array.isArray(body) && body.some((m: { method?: string }) => m.method === "initialize"));
 
   if (isInitialize) {
+    // ── Guard: reject if we've hit the session cap ──
+    if (sessions.size >= MAX_SESSIONS) {
+      res.status(503).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32005,
+          message: `Server at session capacity (${MAX_SESSIONS}). Try again later.`,
+        },
+      });
+      return;
+    }
+
     // ── Stateful mode: create a session for MCP clients (Postman MCP, Claude, etc.) ──
     const mcpServer = createMcpServer();
     const transport = new StreamableHTTPServerTransport({
@@ -160,13 +173,15 @@ app.post("/mcp", async (req: Request, res: Response) => {
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal error";
     console.error("MCP stateless request error:", error);
-    try { await mcpServer.close(); } catch { /* ignore */ }
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: "2.0",
         error: { code: -32603, message },
       });
     }
+  } finally {
+    // Clean up one-shot resources to prevent connection/memory leaks
+    try { await mcpServer.close(); } catch { /* ignore */ }
   }
 });
 
@@ -241,7 +256,7 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log(`\n🚀 MCP Azure Storage Server v1.0.0`);
   console.log(`   MCP endpoint : http://localhost:${PORT}/mcp`);
   console.log(`   Health check : http://localhost:${PORT}/health`);
@@ -251,5 +266,32 @@ app.listen(PORT, () => {
   );
   console.log(`   Rate limit   : ${RATE_LIMIT_MAX} req / ${RATE_LIMIT_WINDOW_MS / 60000} min per IP`);
   console.log(`   Session TTL  : ${SESSION_TTL_MS / 60000} minutes`);
+  console.log(`   Max sessions : ${MAX_SESSIONS}`);
   console.log(`   JSON limit   : 50mb\n`);
 });
+
+// ── Graceful shutdown — close sessions & stop accepting requests ──
+function shutdown(signal: string) {
+  console.log(`\n${signal} received — shutting down gracefully…`);
+  clearInterval(sessionCleanupTimer);
+
+  // Close all active MCP sessions
+  for (const [sid, session] of sessions) {
+    try { session.server.close(); } catch { /* ignore */ }
+    sessions.delete(sid);
+  }
+
+  httpServer.close(() => {
+    console.log("HTTP server closed.");
+    process.exit(0);
+  });
+
+  // Force exit after 10s if connections don't drain
+  setTimeout(() => {
+    console.error("Forced shutdown after timeout.");
+    process.exit(1);
+  }, 10_000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

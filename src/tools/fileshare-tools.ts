@@ -9,16 +9,15 @@ import { getStorageConfig } from "../config.js";
 export function registerFileShareTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  function getShareServiceClient(): ShareServiceClient {
-    const credential = new StorageSharedKeyCredential(
-      config.accountName,
-      config.accountKey
-    );
-    return new ShareServiceClient(
-      `https://${config.accountName}.file.core.windows.net`,
-      credential
-    );
-  }
+  // ── Singleton client — reuses internal connection pool across all tool calls ──
+  const credential = new StorageSharedKeyCredential(
+    config.accountName,
+    config.accountKey
+  );
+  const shareServiceClient = new ShareServiceClient(
+    `https://${config.accountName}.file.core.windows.net`,
+    credential
+  );
 
   // ── SHARE MANAGEMENT ──
 
@@ -27,7 +26,7 @@ export function registerFileShareTools(server: McpServer): void {
     "List all Azure file shares in the storage account. Use this to discover available shares before performing file operations. Returns an array of objects with 'name' and 'properties' (quota, last modified, etc.) for each share.",
     {},
     async () => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const shares: { name: string; properties: Record<string, unknown> }[] = [];
       for await (const share of client.listShares()) {
         shares.push({
@@ -48,7 +47,7 @@ export function registerFileShareTools(server: McpServer): void {
       shareName: z.string().describe("File share name (lowercase letters, digits, and hyphens, 3-63 chars, e.g. 'project-documents')"),
     },
     async ({ shareName }) => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
       const exists = await shareClient.exists();
       if (!exists) {
@@ -74,7 +73,7 @@ export function registerFileShareTools(server: McpServer): void {
       shareName: z.string().describe("Name of the file share to delete (e.g. 'project-documents')"),
     },
     async ({ shareName }) => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
       await shareClient.delete();
       return {
@@ -97,7 +96,7 @@ export function registerFileShareTools(server: McpServer): void {
         .describe("Forward-slash-separated directory path to create, including any nested levels (e.g. 'reports/2024/q1')"),
     },
     async ({ shareName, directoryPath }) => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
 
       // Create each level of the directory path
@@ -135,7 +134,7 @@ export function registerFileShareTools(server: McpServer): void {
       directoryPath: z.string().describe("Path of the directory to delete (e.g. 'reports/2024/q1')"),
     },
     async ({ shareName, directoryPath }) => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const dirClient = client
         .getShareClient(shareName)
         .getDirectoryClient(directoryPath);
@@ -165,7 +164,7 @@ export function registerFileShareTools(server: McpServer): void {
         .describe("Directory path to list (e.g. 'reports/2024'), or empty string for the share root"),
     },
     async ({ shareName, directoryPath }) => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
       const dirClient =
         directoryPath && directoryPath !== ""
@@ -221,7 +220,7 @@ export function registerFileShareTools(server: McpServer): void {
       contentBase64: z.string().describe("File content encoded as a base64 string. Use 'util-to-base64' to convert text, or provide raw base64 for binary files."),
     },
     async ({ shareName, directoryPath, fileName, contentBase64 }) => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
 
       // Ensure directory exists
@@ -281,7 +280,7 @@ export function registerFileShareTools(server: McpServer): void {
       fileName: z.string().describe("Name of the file to read (e.g. 'q1-summary.pdf')"),
     },
     async ({ shareName, directoryPath, fileName }) => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
 
       const dirClient =
@@ -324,7 +323,7 @@ export function registerFileShareTools(server: McpServer): void {
       fileName: z.string().describe("Name of the file to delete (e.g. 'q1-summary.pdf')"),
     },
     async ({ shareName, directoryPath, fileName }) => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
 
       const dirClient =
@@ -360,7 +359,7 @@ export function registerFileShareTools(server: McpServer): void {
       fileName: z.string().describe("Name of the file to inspect (e.g. 'q1-summary.pdf')"),
     },
     async ({ shareName, directoryPath, fileName }) => {
-      const client = getShareServiceClient();
+      const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
 
       const dirClient =

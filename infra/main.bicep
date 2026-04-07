@@ -70,6 +70,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 3000
         transport: 'http'
         // Automatic HTTPS + managed TLS cert on *.azurecontainerapps.io
+        stickySessions: {
+          affinity: 'sticky'   // Route same client to same replica (preserves stateful MCP sessions)
+        }
       }
       registries: [
         {
@@ -135,6 +138,16 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       scale: {
         minReplicas: 0
         maxReplicas: 5
+        rules: [
+          {
+            name: 'http-scaling'
+            http: {
+              metadata: {
+                concurrentRequests: '20'   // Scale up when requests per replica exceed 20
+              }
+            }
+          }
+        ]
       }
     }
   }

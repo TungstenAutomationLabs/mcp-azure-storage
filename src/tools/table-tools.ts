@@ -10,33 +10,35 @@ import { getStorageConfig } from "../config.js";
 export function registerTableTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  function getTableServiceClient(): TableServiceClient {
-    const credential = new AzureNamedKeyCredential(
-      config.accountName,
-      config.accountKey
-    );
-    return new TableServiceClient(
-      `https://${config.accountName}.table.core.windows.net`,
-      credential
-    );
-  }
+  // ── Singleton credential + service client — reuses connections across all tool calls ──
+  const credential = new AzureNamedKeyCredential(
+    config.accountName,
+    config.accountKey
+  );
+  const tableServiceClient = new TableServiceClient(
+    `https://${config.accountName}.table.core.windows.net`,
+    credential
+  );
 
+  // TableClient is per-table, but we cache them to reuse connections
+  const tableClientCache = new Map<string, TableClient>();
   function getTableClient(tableName: string): TableClient {
-    const credential = new AzureNamedKeyCredential(
-      config.accountName,
-      config.accountKey
-    );
-    return new TableClient(
-      `https://${config.accountName}.table.core.windows.net`,
-      tableName,
-      credential
-    );
+    let client = tableClientCache.get(tableName);
+    if (!client) {
+      client = new TableClient(
+        `https://${config.accountName}.table.core.windows.net`,
+        tableName,
+        credential
+      );
+      tableClientCache.set(tableName, client);
+    }
+    return client;
   }
 
   // ── TABLE MANAGEMENT ──
 
   server.tool("table-list", "List all tables in the storage account. Use this to discover available tables before performing entity operations. Returns an array of objects with 'name' and 'index' (1-based) for each table.", {}, async () => {
-    const client = getTableServiceClient();
+    const client = tableServiceClient;
     const tables: { name: string; index: number }[] = [];
     let i = 1;
     for await (const table of client.listTables()) {
@@ -54,7 +56,7 @@ export function registerTableTools(server: McpServer): void {
     "Create a new table if it doesn't already exist. Idempotent — returns a message indicating whether the table was created or already existed. Use this before upserting entities to a new table.",
     { tableName: z.string().describe("Table name to create (letters and digits only, 3-63 chars, must start with a letter, e.g. 'OrderHistory')") },
     async ({ tableName }) => {
-      const client = getTableServiceClient();
+      const client = tableServiceClient;
       let status = "";
       await client.createTable(tableName, {
         onResponse: (response) => {
@@ -73,7 +75,7 @@ export function registerTableTools(server: McpServer): void {
     "Permanently delete a table and ALL entities inside it. WARNING: This is irreversible — all rows will be lost. Use 'table-entity-query' to inspect contents before deleting.",
     { tableName: z.string().describe("Name of the table to delete (e.g. 'OrderHistory')") },
     async ({ tableName }) => {
-      const client = getTableServiceClient();
+      const client = tableServiceClient;
       await client.deleteTable(tableName);
       return {
         content: [

@@ -13,16 +13,15 @@ import { getStorageConfig } from "../config.js";
 export function registerBlobTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  function getBlobServiceClient(): BlobServiceClient {
-    const credential = new StorageSharedKeyCredential(
-      config.accountName,
-      config.accountKey
-    );
-    return new BlobServiceClient(
-      `https://${config.accountName}.blob.core.windows.net`,
-      credential
-    );
-  }
+  // ── Singleton client — reuses internal connection pool across all tool calls ──
+  const credential = new StorageSharedKeyCredential(
+    config.accountName,
+    config.accountKey
+  );
+  const blobServiceClient = new BlobServiceClient(
+    `https://${config.accountName}.blob.core.windows.net`,
+    credential
+  );
 
   // ──────────────────────────────────────────────────────────────
   // CONTAINER OPERATIONS
@@ -33,7 +32,7 @@ export function registerBlobTools(server: McpServer): void {
     "List all blob containers in the storage account. Use this to discover available containers before performing blob operations. Returns an array of objects with 'name' and 'lastModified' for each container.",
     {},
     async () => {
-      const client = getBlobServiceClient();
+      const client = blobServiceClient;
       const containers: { name: string; lastModified?: Date }[] = [];
       for await (const container of client.listContainers()) {
         containers.push({
@@ -57,7 +56,7 @@ export function registerBlobTools(server: McpServer): void {
         .describe("Container name (3-63 chars, lowercase letters, numbers, and hyphens only, e.g. 'my-data-2024'). Use 'util-to-container-name' to sanitise arbitrary text."),
     },
     async ({ containerName }) => {
-      const client = getBlobServiceClient();
+      const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const exists = await containerClient.exists();
       if (!exists) {
@@ -89,7 +88,7 @@ export function registerBlobTools(server: McpServer): void {
       containerName: z.string().describe("Name of the container to delete (e.g. 'my-data-2024')"),
     },
     async ({ containerName }) => {
-      const client = getBlobServiceClient();
+      const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const exists = await containerClient.exists();
       if (exists) {
@@ -121,7 +120,7 @@ export function registerBlobTools(server: McpServer): void {
       containerName: z.string().describe("Name of the container to check (e.g. 'my-data-2024')"),
     },
     async ({ containerName }) => {
-      const client = getBlobServiceClient();
+      const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const exists = await containerClient.exists();
       return {
@@ -151,7 +150,7 @@ export function registerBlobTools(server: McpServer): void {
         .describe("When true, includes custom metadata key-value pairs in each result object"),
     },
     async ({ containerName, directory, includeMetadata }) => {
-      const client = getBlobServiceClient();
+      const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
 
       const listOptions: {
@@ -225,7 +224,7 @@ export function registerBlobTools(server: McpServer): void {
         .describe("Optional custom metadata as key-value string pairs (e.g. {\"author\": \"Alice\", \"department\": \"Sales\"})"),
     },
     async ({ containerName, blobName, contentBase64, metadata }) => {
-      const client = getBlobServiceClient();
+      const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
@@ -275,7 +274,7 @@ export function registerBlobTools(server: McpServer): void {
         .describe("Hours until the SAS URL expires (only used when returnUrl=true, default: 24)"),
     },
     async ({ containerName, blobName, returnUrl, sasExpiryHours }) => {
-      const client = getBlobServiceClient();
+      const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
 
       if (returnUrl) {
@@ -330,7 +329,7 @@ export function registerBlobTools(server: McpServer): void {
       blobName: z.string().describe("Full blob name including virtual directory path (e.g. 'reports/2024/q1-summary.pdf')"),
     },
     async ({ containerName, blobName }) => {
-      const client = getBlobServiceClient();
+      const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const blockBlobClient = containerClient.getBlockBlobClient(blobName);
       await blockBlobClient.delete({ deleteSnapshots: "include" });
@@ -356,7 +355,7 @@ export function registerBlobTools(server: McpServer): void {
         .describe("Metadata key-value string pairs to set (e.g. {\"author\": \"Alice\", \"status\": \"reviewed\"}). Replaces ALL existing metadata."),
     },
     async ({ containerName, blobName, metadata }) => {
-      const client = getBlobServiceClient();
+      const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const blobClient = containerClient.getBlobClient(blobName);
       await blobClient.setMetadata(metadata);
