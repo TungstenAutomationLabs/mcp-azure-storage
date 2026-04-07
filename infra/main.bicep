@@ -112,19 +112,21 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   properties: {
     managedEnvironmentId: containerAppEnv.id
     configuration: {
-      // Single revision mode (default) is required for sticky sessions.
-      // Azure Container Apps only supports session affinity in Single mode.
-      // Deployments replace the active revision atomically (brief downtime).
       // ── Ingress ──
       // External ingress exposes the app on a public *.azurecontainerapps.io URL
       // with automatic HTTPS and a managed TLS certificate.
+      //
+      // Note: Sticky sessions (session affinity) are not enabled here because
+      // Azure Container Apps has limited API support for the feature across
+      // revision modes. The MCP server handles this at the application layer:
+      //  - Stateful mode: sessions are keyed by Mcp-Session-Id header
+      //  - Stateless mode: each request is self-contained (no affinity needed)
+      // For production with multiple replicas, consider adding external session
+      // state (e.g. Redis) or enabling sticky sessions if your API version supports it.
       ingress: {
         external: true
         targetPort: 3000         // Must match the Express PORT in Dockerfile
         transport: 'http'        // Container speaks plain HTTP; the platform terminates TLS
-        stickySessions: {
-          affinity: 'sticky'     // Route same client to same replica (preserves stateful MCP sessions)
-        }
       }
       // ── Registry ──
       // Pull images from our private ACR using the app's managed identity
@@ -162,6 +164,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           // Plain values and secret references are injected into the container.
           // The MCP server reads these in src/config.ts via getStorageConfig().
           env: [
+            {
+              name: 'NODE_ENV'
+              value: 'production'                  // Ensures production-mode behaviour even if Dockerfile ENV is overridden
+            }
             {
               name: 'AZURE_STORAGE_ACCOUNT_NAME'
               value: storageAccount.name

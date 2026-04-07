@@ -388,8 +388,21 @@ azd init
 
 ### 3. Set secrets
 
+Generate a random API key and store it in your azd environment:
+
+**macOS / Linux:**
 ```bash
 azd env set MCP_API_KEY "$(openssl rand -base64 24)"
+```
+
+**Windows (PowerShell):**
+```powershell
+azd env set MCP_API_KEY ([Convert]::ToBase64String((1..24 | ForEach-Object { Get-Random -Max 256 }) -as [byte[]]))
+```
+
+Or simply set a strong key of your choice:
+```bash
+azd env set MCP_API_KEY "your-strong-secret-key-here"
 ```
 
 ### 4. Deploy
@@ -485,6 +498,9 @@ azd down --purge
 | `SAS_DEFAULT_PERMISSIONS` | No | `rl` | Default SAS permissions |
 | `RATE_LIMIT_WINDOW_MINUTES` | No | `15` | Rate limit window (minutes) |
 | `RATE_LIMIT_MAX_REQUESTS` | No | `300` | Max requests per window per IP |
+| `MAX_SESSIONS` | No | `100` | Maximum concurrent stateful MCP sessions (returns 503 when full) |
+
+> **Note:** The Azure deployment uses `minReplicas: 0` (scale-to-zero) for cost savings. The first request after an idle period may experience a cold start delay of 5–15 seconds while a new container instance spins up.
 
 ---
 
