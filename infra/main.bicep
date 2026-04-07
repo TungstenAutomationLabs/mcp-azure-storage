@@ -4,37 +4,48 @@
 // Provisions all Azure resources needed to run the MCP server:
 //   1. Log Analytics Workspace — centralised logging for Container Apps
 //   2. Azure Container Registry (ACR) — stores the Docker image
-//   3. Container Apps Environment — managed Kubernetes hosting layer
-//   4. Storage Account — the Azure Storage account the MCP tools operate on
-//   5. Container App — the running MCP server instance
-//   6. RBAC Role Assignments — least-privilege access for the app identity
+//   3. User-Assigned Managed Identity — shared identity for ACR pull + RBAC
+//   4. RBAC Role Assignments — AcrPull + Storage roles (before Container App)
+//   5. Container Apps Environment — managed Kubernetes hosting layer
+//   6. Storage Account — the Azure Storage account the MCP tools operate on
+//   7. Container App — the running MCP server instance
 //
 // Deployed via Azure Developer CLI:
 //   azd up        — provision infrastructure + build & deploy container
+//   azd provision — provision/update infrastructure only
 //   azd deploy    — rebuild & redeploy container only
 //   azd down      — tear down all resources
 //
-// The template uses a system-assigned managed identity on the Container App
-// and grants it AcrPull, Blob/Queue/Table Data Contributor roles so the
-// server can pull its image and access storage without storing credentials
-// (except the shared key, which is needed by the Azure Storage SDK for
-// SharedKey auth and SAS token generation).
+// The template uses a user-assigned managed identity created BEFORE the
+// Container App. This breaks the circular dependency that exists with
+// system-assigned identities (where the principalId is only available
+// after the Container App is created, but ACR pull needs credentials
+// during creation). The identity is granted AcrPull, Blob/Queue/Table
+// Data Contributor roles before the Container App is provisioned.
 // =============================================================================
 
 targetScope = 'resourceGroup'
 
 // ── Parameters ────────────────────────────────────────────────
 // location:        Azure region; defaults to the resource group's location.
-// environmentName: Base name used to derive all child resource names (e.g. "mcp-storage").
-// containerImage:  Fully-qualified image reference; overridden by azd during deployment.
+// environmentName: Base name used to derive all child resource names.
 // mcpApiKey:       Bearer token clients must present to authenticate MCP requests.
 
 param location string = resourceGroup().location
 param environmentName string
-param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 
 @secure()
 param mcpApiKey string
+
+// ── Placeholder Image ─────────────────────────────────────────
+// During `azd provision`, the Container App always starts with this public
+// placeholder image. The real application image is pushed to ACR and applied
+// during `azd deploy` (the second phase of `azd up`).
+//
+// This avoids a common failure after `azd down --purge` + re-provision where
+// a stale image tag (cached in .azure/<env>/.env) references a deleted ACR
+// image, causing UNAUTHORIZED or "image not found" errors.
+var placeholderImage = 'mcr.microsoft.com/k8se/quickstart:latest'
 
 // ── Log Analytics (required by Container Apps Environment) ────
 // Container Apps require a Log Analytics workspace for application and system
@@ -52,13 +63,54 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 // ── Azure Container Registry ─────────────────────────────────
 // Stores the MCP server Docker image. The Basic SKU is sufficient for low-
 // throughput dev/test scenarios. Admin user is disabled — image pulls use
-// the Container App's managed identity via the AcrPull role assignment below.
+// the user-assigned managed identity via the AcrPull role assignment below.
 resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: '${replace(environmentName, '-', '')}acr'
   location: location
   sku: { name: 'Basic' }
   properties: {
     adminUserEnabled: false
+  }
+}
+
+// ── User-Assigned Managed Identity ───────────────────────────
+// Created as an independent resource BEFORE the Container App. This breaks
+// the circular dependency that plagues system-assigned identities:
+//   System-assigned: Container App → principalId → AcrPull role → pull image
+//   User-assigned:   Identity → AcrPull role → Container App (can pull immediately)
+//
+// The identity is used for:
+//   1. ACR image pull (via AcrPull role)
+//   2. Storage RBAC (Blob/Queue/Table Data Contributor roles)
+resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${environmentName}-identity'
+  location: location
+}
+
+// =============================================================================
+// RBAC Role Assignments
+//
+// Assigned BEFORE the Container App is created (via dependsOn on the Container
+// App resource). The user-assigned identity receives all roles upfront so the
+// Container App can pull images and access storage from its first revision.
+//
+// Role GUIDs are well-known Azure built-in role definition IDs:
+//   7f951dda-...  = AcrPull
+//   ba92f5b4-...  = Storage Blob Data Contributor
+//   974c5e8b-...  = Storage Queue Data Contributor
+//   0a9a7e1f-...  = Storage Table Data Contributor
+// =============================================================================
+
+// ── Role: AcrPull — let the identity pull images from ACR ────
+// Without this, the container runtime cannot download the Docker image from
+// our private registry. Scoped to the ACR resource only.
+resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(containerRegistry.id, managedIdentity.id, '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+  scope: containerRegistry
+  properties: {
+    principalId: managedIdentity.properties.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+    principalType: 'ServicePrincipal'
   }
 }
 
@@ -98,11 +150,53 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
+// ── Role: Storage Blob Data Contributor ──────────────────────
+// Grants read/write/delete access to blob containers and blobs.
+// Used by blob-tools.ts for container and blob operations.
+resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, managedIdentity.id, 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
+  scope: storageAccount
+  properties: {
+    principalId: managedIdentity.properties.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// ── Role: Storage Queue Data Contributor ─────────────────────
+// Grants read/write/delete access to queues and messages.
+// Used by queue-tools.ts for queue CRUD and message processing.
+resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, managedIdentity.id, '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
+  scope: storageAccount
+  properties: {
+    principalId: managedIdentity.properties.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// ── Role: Storage Table Data Contributor ─────────────────────
+// Grants read/write/delete access to tables and entities.
+// Used by table-tools.ts for table CRUD and entity queries.
+resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, managedIdentity.id, '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
+  scope: storageAccount
+  properties: {
+    principalId: managedIdentity.properties.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
+    principalType: 'ServicePrincipal'
+  }
+}
+
 // ── Container App ────────────────────────────────────────────
 // The main application resource. Runs the MCP server Docker image as a
-// serverless container with automatic HTTPS, health probes, and auto-scaling.
-// A system-assigned managed identity is used for passwordless access to ACR
-// and (in future) Azure Storage RBAC.
+// serverless container with automatic HTTPS and auto-scaling.
+//
+// Uses a user-assigned managed identity for passwordless ACR pull and
+// Storage RBAC. The AcrPull role assignment is completed BEFORE this
+// resource is created (via dependsOn), eliminating the circular dependency
+// that previously caused UNAUTHORIZED errors on first provision.
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${environmentName}-mcp'
   location: location
@@ -110,8 +204,17 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     'azd-service-name': 'mcp-server'   // Required: maps this resource to the service in azure.yaml
   }
   identity: {
-    type: 'SystemAssigned'   // Creates an AAD service principal tied to this app
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${managedIdentity.id}': {}
+    }
   }
+  dependsOn: [
+    acrPullRoleAssignment    // Ensure ACR pull permission exists before first image pull
+    blobRoleAssignment       // Ensure storage roles are ready when app starts
+    queueRoleAssignment
+    tableRoleAssignment
+  ]
   properties: {
     managedEnvironmentId: containerAppEnv.id
     configuration: {
@@ -132,15 +235,15 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         transport: 'http'        // Container speaks plain HTTP; the platform terminates TLS
       }
       // ── Registry ──
-      // Note: The ACR registry configuration is NOT included here intentionally.
-      // During `azd provision`, the Container App starts with a public placeholder
-      // image (mcr.microsoft.com/k8se/quickstart). If we configure the private ACR
-      // here, provisioning fails because the AcrPull role assignment (below) has a
-      // circular dependency — it needs the Container App's principalId, which only
-      // exists after successful creation.
-      //
-      // azd automatically configures the ACR registry during `azd deploy` (the
-      // second phase of `azd up`), after the AcrPull role is in place.
+      // ACR is configured here using the user-assigned managed identity.
+      // Because the AcrPull role is assigned via dependsOn BEFORE this resource
+      // is created, the Container App can authenticate to ACR from its first revision.
+      registries: [
+        {
+          server: containerRegistry.properties.loginServer
+          identity: managedIdentity.id
+        }
+      ]
       // ── Secrets ──
       // Secrets are encrypted at rest and injected as env vars via secretRef.
       // They are NOT exposed in template definitions or Azure Portal UI.
@@ -159,7 +262,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'mcp-server'
-          image: containerImage        // Overridden by azd deploy with the real ACR image
+          image: placeholderImage       // Always uses public placeholder during provision;
+                                        // azd deploy updates to the real ACR image after push
           resources: {
             cpu: json('0.5')           // 0.5 vCPU per replica (min for Container Apps)
             memory: '1Gi'              // 1 GiB RAM per replica
@@ -187,10 +291,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           ]
           // ── Health Probes ──
           // Note: Custom health probes are intentionally omitted. During the
-          // initial `azd up`, the Container App is provisioned with a placeholder
-          // image (mcr.microsoft.com/k8se/quickstart) that does NOT expose /health
-          // on port 3000. Health probes against the placeholder would fail for
-          // 20+ minutes until the revision times out, blocking deployment.
+          // initial `azd provision`, the Container App runs a placeholder image
+          // that does NOT expose /health on port 3000. Health probes against
+          // the placeholder would fail for 20+ minutes until the revision times
+          // out, blocking deployment.
           //
           // Azure Container Apps provides built-in TCP health checks automatically.
           // The MCP server exposes GET /health for manual monitoring and external
@@ -216,72 +320,6 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         ]
       }
     }
-  }
-}
-
-// =============================================================================
-// RBAC Role Assignments
-//
-// Each assignment grants the Container App's managed identity a built-in Azure
-// role, scoped to the specific resource. This follows the principle of least
-// privilege — the app can only perform the actions it needs.
-//
-// Role GUIDs are well-known Azure built-in role definition IDs:
-//   7f951dda-...  = AcrPull
-//   ba92f5b4-...  = Storage Blob Data Contributor
-//   974c5e8b-...  = Storage Queue Data Contributor
-//   0a9a7e1f-...  = Storage Table Data Contributor
-// =============================================================================
-
-// ── Role: AcrPull — let Container App pull images from ACR ───
-// Without this, the container runtime cannot download the Docker image from
-// our private registry. Scoped to the ACR resource only.
-resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(containerRegistry.id, containerApp.id, '7f951dda-4ed3-4680-a7ca-43fe172d538d')
-  scope: containerRegistry
-  properties: {
-    principalId: containerApp.identity.principalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// ── Role: Storage Blob Data Contributor ──────────────────────
-// Grants read/write/delete access to blob containers and blobs.
-// Used by blob-tools.ts for container and blob operations.
-resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccount.id, containerApp.id, 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
-  scope: storageAccount
-  properties: {
-    principalId: containerApp.identity.principalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// ── Role: Storage Queue Data Contributor ─────────────────────
-// Grants read/write/delete access to queues and messages.
-// Used by queue-tools.ts for queue CRUD and message processing.
-resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccount.id, containerApp.id, '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
-  scope: storageAccount
-  properties: {
-    principalId: containerApp.identity.principalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// ── Role: Storage Table Data Contributor ─────────────────────
-// Grants read/write/delete access to tables and entities.
-// Used by table-tools.ts for table CRUD and entity queries.
-resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccount.id, containerApp.id, '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
-  scope: storageAccount
-  properties: {
-    principalId: containerApp.identity.principalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
-    principalType: 'ServicePrincipal'
   }
 }
 

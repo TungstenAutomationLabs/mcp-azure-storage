@@ -2,7 +2,7 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **42 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
-Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and Bicep infrastructure-as-code.
+Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed identity, and Bicep infrastructure-as-code.
 
 ---
 
@@ -18,7 +18,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, managed identity, and 
 - **SAS token generation** — blob and container-level shared access signatures
 - **Base64 content encoding** — upload/download binary files through JSON
 - **Docker** — multi-stage build, non-root container user
-- **Azure Container Apps** — Bicep IaC, auto-HTTPS, scale-to-zero
+- **Azure Container Apps** — Bicep IaC, user-assigned managed identity, auto-HTTPS, scale-to-zero
 
 ---
 
@@ -100,7 +100,7 @@ mcp-azure-storage/
 │       ├── queue-integration.test.ts   # Azurite queue CRUD smoke test
 │       └── table-integration.test.ts   # Azurite table CRUD smoke test
 ├── infra/
-│   ├── main.bicep             # Azure Container Apps + Storage + RBAC
+│   ├── main.bicep             # Azure Container Apps + Storage + Identity + RBAC
 │   └── main.parameters.json   # azd-templated deployment parameters
 ├── .github/workflows/
 │   └── ci.yml                 # GitHub Actions — unit + integration tests
@@ -456,9 +456,11 @@ azd deploy
 
 Both options provision via Bicep:
 - **Resource Group** with Container Apps Environment
+- **Azure Container Registry** (Basic SKU, admin-user disabled)
+- **User-Assigned Managed Identity** — created before the Container App to break the ACR pull circular dependency
 - **Azure Storage Account** (Standard_LRS, TLS 1.2)
-- **Azure Container App** with auto-HTTPS on `*.azurecontainerapps.io`
-- **RBAC** — Blob, Queue, and Table Data Contributor roles
+- **Azure Container App** with auto-HTTPS on `*.azurecontainerapps.io`, placeholder image on first provision
+- **RBAC** — AcrPull + Blob, Queue, and Table Data Contributor roles (all assigned before the Container App is created)
 - **Secrets** — MCP_API_KEY and Storage Account Key injected securely
 
 ### 5. Test the deployed endpoint
@@ -556,6 +558,7 @@ azd down --purge
 - **Rate limiting** — per-IP request throttling to prevent abuse
 - **Session TTL** — idle sessions are automatically evicted after 30 minutes
 - **Non-root Docker** — container runs as unprivileged `appuser`
+- **User-assigned managed identity** — ACR pull + Storage RBAC with no circular dependency
 - **Secrets in Bicep** — storage keys and API keys are injected as Container App secrets via `@secure()` parameters
 - **`.env` gitignored** — credentials never enter version control
 

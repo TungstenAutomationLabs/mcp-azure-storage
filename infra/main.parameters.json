@@ -8,9 +8,6 @@
     "location": {
       "value": "${AZURE_LOCATION}"
     },
-    "containerImage": {
-      "value": "${SERVICE_MCP_SERVER_IMAGE_NAME}"
-    },
     "mcpApiKey": {
       "value": "${MCP_API_KEY}"
     }
