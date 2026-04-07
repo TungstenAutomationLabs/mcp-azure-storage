@@ -182,28 +182,15 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             }
           ]
           // ── Health Probes ──
-          // Liveness: detects deadlocked/crashed processes → restarts the container.
-          // Readiness: gates traffic until the server is ready to accept requests.
-          // Both hit the /health endpoint defined in server.ts.
-          probes: [
-            {
-              type: 'Liveness'
-              httpGet: {
-                path: '/health'
-                port: 3000
-              }
-              periodSeconds: 30          // Check every 30 s
-            }
-            {
-              type: 'Readiness'
-              httpGet: {
-                path: '/health'
-                port: 3000
-              }
-              initialDelaySeconds: 5     // Wait 5 s after start before first check
-              periodSeconds: 10          // Then check every 10 s
-            }
-          ]
+          // Note: Custom health probes are intentionally omitted. During the
+          // initial `azd up`, the Container App is provisioned with a placeholder
+          // image (mcr.microsoft.com/k8se/quickstart) that does NOT expose /health
+          // on port 3000. Health probes against the placeholder would fail for
+          // 20+ minutes until the revision times out, blocking deployment.
+          //
+          // Azure Container Apps provides built-in TCP health checks automatically.
+          // The MCP server exposes GET /health for manual monitoring and external
+          // health checks (e.g., Azure Front Door, uptime monitors).
         }
       ]
       // ── Auto-scaling ──
