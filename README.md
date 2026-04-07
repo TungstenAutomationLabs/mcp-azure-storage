@@ -434,11 +434,27 @@ azd env set MCP_API_KEY "your-strong-secret-key-here"
 
 ### 4. Deploy
 
+#### Option A — Single command
+
 ```bash
 azd up
 ```
 
-This provisions via Bicep:
+#### Option B — Step-by-step (provision then deploy separately)
+
+If `azd up` fails, times out, or you need more control, run the two phases individually:
+
+```bash
+# Step 1: Provision infrastructure (Bicep → Resource Group, ACR, Storage, Container App, RBAC)
+azd provision
+
+# Step 2: Build Docker image, push to ACR, and update the Container App
+azd deploy
+```
+
+> **Tip:** If only infrastructure changed (edited `infra/main.bicep`), run `azd provision` alone. If only application code changed, run `azd deploy` alone. Running both in sequence is equivalent to `azd up`.
+
+Both options provision via Bicep:
 - **Resource Group** with Container Apps Environment
 - **Azure Storage Account** (Standard_LRS, TLS 1.2)
 - **Azure Container App** with auto-HTTPS on `*.azurecontainerapps.io`
