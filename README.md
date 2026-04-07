@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **42 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **35 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed identity, and Bicep infrastructure-as-code.
 
@@ -8,7 +8,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
 
 ## Features
 
-- **42 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **35 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
 - **12 MCP resources** — read-only, URI-addressable data for LLM context (listings, content reads, properties)
 - **Dual-mode transport** — stateful sessions for MCP clients + stateless one-shot for HTTP testing
 - **API key authentication** with constant-time comparison (X-API-Key header or Bearer token)
@@ -40,10 +40,10 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
                                       └──────────┬───────────────┘
                                                   │
                       ┌───────────────────────────┬┴──────────────────────────┐
-                      │      42 Tools (actions)   │    12 Resources (reads)   │
+                      │      35 Tools (actions)   │    12 Resources (reads)   │
                       ├───────────────────────────┼───────────────────────────┤
-                      │ Blob (11) │ Queue (8)     │ Blob (4)  │ Queue (2)    │
-                      │ Table (7) │ FileShare (10)│ Table (2) │ FileShare (4)│
+                      │ Blob (10) │ Queue (6)     │ Blob (4)  │ Queue (2)    │
+                      │ Table (5) │ FileShare (8) │ Table (2) │ FileShare (4)│
                       │ Utility (6)               │                          │
                       └───────────┬───────────────┴──────────┬───────────────┘
                                   │                          │
@@ -67,10 +67,10 @@ mcp-azure-storage/
 │   ├── middleware/
 │   │   └── api-key.ts         # API key auth (X-API-Key / Bearer)
 │   ├── tools/
-│   │   ├── blob-tools.ts      # 11 tools — container + blob CRUD, SAS, metadata
-│   │   ├── queue-tools.ts     #  8 tools — queue CRUD + message operations
-│   │   ├── table-tools.ts     #  7 tools — table CRUD + entity operations
-│   │   ├── fileshare-tools.ts # 10 tools — share/directory/file operations
+│   │   ├── blob-tools.ts      # 10 tools — container + blob CRUD, SAS, metadata
+│   │   ├── queue-tools.ts     #  6 tools — queue CRUD + message operations
+│   │   ├── table-tools.ts     #  5 tools — table CRUD + entity operations
+│   │   ├── fileshare-tools.ts #  8 tools — share/directory/file operations
 │   │   └── utility-tools.ts   #  6 tools — base64, SAS refresh, MIME lookup
 │   └── resources/
 │       ├── blob-resources.ts      #  4 resources — containers, blobs, properties
@@ -85,11 +85,11 @@ mcp-azure-storage/
 │   ├── middleware/
 │   │   └── api-key.test.ts    # API key auth tests (503/401/403/pass-through)
 │   ├── tools/
-│   │   ├── blob-tools.test.ts      # 10 tests — mock Azure Blob SDK
-│   │   ├── queue-tools.test.ts     #  9 tests — mock Azure Queue SDK
-│   │   ├── table-tools.test.ts     #  9 tests — mock Azure Tables SDK
-│   │   ├── fileshare-tools.test.ts #  8 tests — mock Azure File Share SDK
-│   │   └── utility-tools.test.ts   #  8 tests — base64, MIME, container name
+│   │   ├── blob-tools.test.ts      #  9 tests — mock Azure Blob SDK
+│   │   ├── queue-tools.test.ts     #  7 tests — mock Azure Queue SDK
+│   │   ├── table-tools.test.ts     #  7 tests — mock Azure Tables SDK
+│   │   ├── fileshare-tools.test.ts #  6 tests — mock Azure File Share SDK
+│   │   └── utility-tools.test.ts   #  9 tests — base64, MIME, container name
 │   ├── resources/
 │   │   ├── blob-resources.test.ts      # 6 tests — list cap, download guard
 │   │   ├── queue-resources.test.ts     # 3 tests — list cap, properties
@@ -123,11 +123,10 @@ mcp-azure-storage/
 
 ## Available Tools
 
-### Blob Storage (11 tools)
+### Blob Storage (10 tools)
 
 | Tool | Description |
 |------|-------------|
-| `blob-container-list` | List all blob containers with names and last-modified dates. Use to discover available containers. |
 | `blob-container-create` | Create a blob container (idempotent). Use before uploading blobs to a new container. Use `util-to-container-name` to sanitise free-form text into a valid name. |
 | `blob-container-delete` | **Destructive** — permanently delete a container and ALL blobs inside it. Verify with `blob-container-exists` first. |
 | `blob-container-exists` | Check whether a container exists. Returns `{ exists: true/false }`. |
@@ -139,32 +138,28 @@ mcp-azure-storage/
 | `blob-get-sas-url` | Generate a time-limited SAS URL for a specific blob. Use to grant temporary access without exposing account keys. |
 | `blob-get-container-sas` | Generate a time-limited SAS token for an entire container. Returns both the token and a ready-to-use connection string. |
 
-### Queue Storage (8 tools)
+### Queue Storage (6 tools)
 
 | Tool | Description |
 |------|-------------|
-| `queue-list` | List all queue names in the storage account. |
 | `queue-create` | Create a queue (idempotent). Use before sending messages to a new queue. |
-| `queue-delete` | **Destructive** — permanently delete a queue and ALL pending messages. Check `queue-get-properties` first. |
+| `queue-delete` | **Destructive** — permanently delete a queue and ALL pending messages. Check queue properties via the `azure-queue:///queues/{queueName}/properties` resource first. |
 | `queue-send-message` | Send a text message to a queue with optional TTL. For structured data, serialise as JSON string. |
 | `queue-peek-messages` | Preview messages at the front of a queue WITHOUT removing them. Messages stay visible to other receivers. |
 | `queue-receive-messages` | Receive and hide messages for processing. Call `queue-delete-message` after processing to permanently remove each message. |
 | `queue-delete-message` | Permanently remove a processed message. Requires `messageId` + `popReceipt` from `queue-receive-messages`. |
-| `queue-get-properties` | Get queue properties including approximate pending message count. |
 
-### Table Storage (7 tools)
+### Table Storage (5 tools)
 
 | Tool | Description |
 |------|-------------|
-| `table-list` | List all table names in the storage account. |
 | `table-create` | Create a table (idempotent). Use before upserting entities to a new table. |
 | `table-delete` | **Destructive** — permanently delete a table and ALL entities. |
 | `table-entity-upsert` | Insert or merge-update an entity. Pass `partitionKey`, `rowKey`, and a flat `entity` JSON object (`{"name": "Alice", "score": 95}`). Merge preserves existing properties not in the request. |
-| `table-entity-get` | Get a single entity by exact partition key + row key (fastest lookup). |
 | `table-entity-query` | Query entities with an OData filter (e.g. `PartitionKey eq 'sales'`). Omit the filter to return all rows up to the limit. |
 | `table-entity-delete` | **Destructive** — permanently delete a single entity by partition key + row key. |
 
-### File Share (10 tools)
+### File Share (8 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -172,12 +167,10 @@ mcp-azure-storage/
 | `fileshare-create-share` | Create a file share (idempotent). Use before uploading files to a new share. |
 | `fileshare-delete-share` | **Destructive** — permanently delete a share and ALL files/directories inside it. |
 | `fileshare-create-directory` | Create a directory and any missing parents (idempotent). Or let `fileshare-upload-file` auto-create directories. |
-| `fileshare-delete-directory` | Delete a directory (must be empty — remove all contents first). Use `fileshare-list` to check. |
-| `fileshare-list` | List files and subdirectories in a directory. Returns name, kind (`file`/`directory`), size, and last-modified. |
+| `fileshare-delete-directory` | Delete a directory (must be empty — remove all contents first). Use the `azure-fileshare:///shares/{shareName}/files` resource to check. |
 | `fileshare-upload-file` | Upload a file (base64 content). Auto-creates parent directories. Use `util-to-base64` to encode text first. |
 | `fileshare-read-file` | Download file content as base64. Use `util-from-base64` to decode text. |
 | `fileshare-delete-file` | **Destructive** — permanently delete a file from a share. |
-| `fileshare-get-file-properties` | Get file properties (size, content type, timestamps, metadata) without downloading the content. |
 
 ### Utilities (6 tools)
 
@@ -328,8 +321,8 @@ Skip `initialize` entirely — send tool calls directly:
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
-    "name": "blob-container-list",
-    "arguments": {}
+    "name": "blob-list",
+    "arguments": { "containerName": "my-container" }
   },
   "id": 2
 }
@@ -648,7 +641,7 @@ npm run test:watch
 npm run test:coverage
 ```
 
-**Test coverage:** Config, API key middleware, all 42 tools across 5 modules, all 12 resources across 4 modules.
+**Test coverage:** Config, API key middleware, all 35 tools across 5 modules, all 12 resources across 4 modules.
 
 ### Integration Tests (Azurite)
 

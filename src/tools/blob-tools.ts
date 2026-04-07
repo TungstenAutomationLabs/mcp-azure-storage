@@ -1,9 +1,12 @@
 /**
- * Azure Blob Storage MCP tools — 11 tools.
+ * Azure Blob Storage MCP tools — 10 tools.
  *
- * Provides container management (list, create, delete, exists), blob CRUD
+ * Provides container management (create, delete, exists), blob CRUD
  * (list, create/upload, read/download, delete, set-metadata), and SAS token
  * generation (blob-level and container-level).
+ *
+ * Note: Container listing is provided by the `azure-blob:///containers`
+ * MCP resource (see resources/blob-resources.ts).
  *
  * All blob content is transferred as base64 strings within JSON.
  * Use `util-to-base64` / `util-from-base64` for text encoding/decoding.
@@ -24,7 +27,7 @@ import {
 import { getStorageConfig } from "../config.js";
 
 /**
- * Register all 11 Blob Storage tools on the given MCP server.
+ * Register all 10 Blob Storage tools on the given MCP server.
  *
  * Creates a singleton BlobServiceClient that reuses the internal HTTP
  * connection pool across all tool invocations for better performance.
@@ -47,25 +50,6 @@ export function registerBlobTools(server: McpServer): void {
   // ──────────────────────────────────────────────────────────────
   // CONTAINER OPERATIONS
   // ──────────────────────────────────────────────────────────────
-
-  server.tool(
-    "blob-container-list",
-    "List all blob containers in the storage account. Use this to discover available containers before performing blob operations. Returns an array of objects with 'name' and 'lastModified' for each container.",
-    {},
-    async () => {
-      const client = blobServiceClient;
-      const containers: { name: string; lastModified?: Date }[] = [];
-      for await (const container of client.listContainers()) {
-        containers.push({
-          name: container.name,
-          lastModified: container.properties.lastModified,
-        });
-      }
-      return {
-        content: [{ type: "text", text: JSON.stringify(containers, null, 2) }],
-      };
-    }
-  );
 
   server.tool(
     "blob-container-create",

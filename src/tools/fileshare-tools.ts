@@ -1,9 +1,14 @@
 /**
- * Azure File Share MCP tools — 10 tools.
+ * Azure File Share MCP tools — 8 tools.
  *
  * Provides share management (list, create, delete), directory management
- * (create with nested parents, delete), listing (files + subdirectories),
- * file CRUD (upload, read/download, delete), and property inspection.
+ * (create with nested parents, delete), and file CRUD (upload, read/download,
+ * delete).
+ *
+ * Note: Directory listing and file property inspection are provided by the
+ * `azure-fileshare:///shares/{shareName}/files/{directoryPath}` and
+ * `azure-fileshare:///shares/{shareName}/properties/{directoryPath}/{fileName}`
+ * MCP resources (see resources/fileshare-resources.ts).
  *
  * File content is transferred as base64 strings within JSON, the same as
  * blob tools. Use `util-to-base64` / `util-from-base64` for text encoding.
@@ -24,7 +29,7 @@ import {
 import { getStorageConfig } from "../config.js";
 
 /**
- * Register all 10 File Share tools on the given MCP server.
+ * Register all 8 File Share tools on the given MCP server.
  *
  * Creates a singleton ShareServiceClient that reuses the internal HTTP
  * connection pool across all tool invocations.
@@ -168,62 +173,6 @@ export function registerFileShareTools(server: McpServer): void {
           {
             type: "text",
             text: `Directory "${directoryPath}" deleted from share "${shareName}".`,
-          },
-        ],
-      };
-    }
-  );
-
-  // ── LIST FILES & DIRECTORIES ─────────────────────────────────────────────
-
-  server.tool(
-    "fileshare-list",
-    "List all files and subdirectories within a directory of a file share. Use this to browse share contents or verify files exist before reading/deleting. Returns JSON with 'shareName', 'directoryPath', and 'items' — each item has 'name', 'kind' ('file' or 'directory'), and for files: 'contentLength' (bytes) and 'lastModified'.",
-    {
-      shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
-      directoryPath: z
-        .string()
-        .optional()
-        .default("")
-        .describe("Directory path to list (e.g. 'reports/2024'), or empty string for the share root"),
-    },
-    async ({ shareName, directoryPath }) => {
-      const client = shareServiceClient;
-      const shareClient = client.getShareClient(shareName);
-      const dirClient =
-        directoryPath && directoryPath !== ""
-          ? shareClient.getDirectoryClient(directoryPath)
-          : shareClient.rootDirectoryClient;
-
-      const items: {
-        name: string;
-        kind: "file" | "directory";
-        contentLength?: number;
-        lastModified?: Date;
-      }[] = [];
-
-      for await (const entity of dirClient.listFilesAndDirectories()) {
-        if (entity.kind === "directory") {
-          items.push({ name: entity.name, kind: "directory" });
-        } else {
-          items.push({
-            name: entity.name,
-            kind: "file",
-            contentLength: entity.properties?.contentLength,
-            lastModified: entity.properties?.lastModified,
-          });
-        }
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              { shareName, directoryPath: directoryPath || "/", items },
-              null,
-              2
-            ),
           },
         ],
       };
@@ -375,49 +324,6 @@ export function registerFileShareTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "fileshare-get-file-properties",
-    "Get detailed properties and metadata for a specific file in a file share without downloading its content. Use this to check file size, content type, timestamps, and custom metadata. Returns JSON with 'fileName', 'contentLength' (bytes), 'contentType', 'lastModified', 'createdOn', and 'metadata'.",
-    {
-      shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
-      directoryPath: z
-        .string()
-        .describe("Directory containing the file (e.g. 'reports/2024'), or '.' for the share root"),
-      fileName: z.string().describe("Name of the file to inspect (e.g. 'q1-summary.pdf')"),
-    },
-    async ({ shareName, directoryPath, fileName }) => {
-      const client = shareServiceClient;
-      const shareClient = client.getShareClient(shareName);
-
-      const dirClient =
-        !directoryPath || directoryPath === "." || directoryPath === ""
-          ? shareClient.rootDirectoryClient
-          : shareClient.getDirectoryClient(directoryPath);
-
-      const fileClient = dirClient.getFileClient(fileName);
-      const props = await fileClient.getProperties();
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                fileName,
-                contentLength: props.contentLength,
-                contentType: props.contentType,
-                lastModified: props.lastModified,
-                createdOn: props.fileCreatedOn,
-                metadata: props.metadata,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
 }
 
 /**

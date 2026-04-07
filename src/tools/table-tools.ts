@@ -1,8 +1,12 @@
 /**
- * Azure Table Storage MCP tools — 7 tools.
+ * Azure Table Storage MCP tools — 5 tools.
  *
- * Provides table management (list, create, delete) and entity CRUD
- * (upsert, get, query, delete).
+ * Provides table management (create, delete) and entity operations
+ * (upsert, query, delete).
+ *
+ * Note: Table listing and single-entity get are provided by the
+ * `azure-table:///tables` and `azure-table:///tables/{tableName}/entities/{partitionKey}/{rowKey}`
+ * MCP resources (see resources/table-resources.ts).
  *
  * Table Storage is a schemaless NoSQL key-value store. Each entity is
  * identified by a composite key: (partitionKey, rowKey). Entities within
@@ -24,7 +28,7 @@ import {
 import { getStorageConfig } from "../config.js";
 
 /**
- * Register all 7 Table Storage tools on the given MCP server.
+ * Register all 5 Table Storage tools on the given MCP server.
  *
  * Creates a singleton TableServiceClient for management operations and
  * caches per-table TableClients for entity operations.
@@ -67,20 +71,6 @@ export function registerTableTools(server: McpServer): void {
   }
 
   // ── TABLE MANAGEMENT ─────────────────────────────────────────────────────
-
-  server.tool("table-list", "List all tables in the storage account. Use this to discover available tables before performing entity operations. Returns an array of objects with 'name' and 'index' (1-based) for each table.", {}, async () => {
-    const client = tableServiceClient;
-    const tables: { name: string; index: number }[] = [];
-    let i = 1;
-    for await (const table of client.listTables()) {
-      if (table.name) {
-        tables.push({ name: table.name, index: i++ });
-      }
-    }
-    return {
-      content: [{ type: "text", text: JSON.stringify(tables, null, 2) }],
-    };
-  });
 
   server.tool(
     "table-create",
@@ -152,23 +142,6 @@ export function registerTableTools(server: McpServer): void {
             }),
           },
         ],
-      };
-    }
-  );
-
-  server.tool(
-    "table-entity-get",
-    "Retrieve a single entity by its exact partition key and row key. This is the fastest way to look up a specific entity — use it when you know both keys. Returns the full entity object with all properties, including system fields (timestamp, etag).",
-    {
-      tableName: z.string().describe("Name of the table (e.g. 'OrderHistory')"),
-      partitionKey: z.string().describe("Partition key of the entity to retrieve (e.g. 'sales-region-west')"),
-      rowKey: z.string().describe("Row key of the entity to retrieve (e.g. 'order-20240315-001')"),
-    },
-    async ({ tableName, partitionKey, rowKey }) => {
-      const client = getTableClient(tableName);
-      const entity = await client.getEntity(partitionKey, rowKey);
-      return {
-        content: [{ type: "text", text: JSON.stringify(entity, null, 2) }],
       };
     }
   );

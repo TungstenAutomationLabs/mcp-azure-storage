@@ -76,7 +76,7 @@ app.use(express.json({ limit: "50mb" }));
 // ── MCP server factory ───────────────────────────────────────────────────────
 
 /**
- * Create a fresh MCP server instance with all 42 tools and 12 resources.
+ * Create a fresh MCP server instance with all 35 tools and 12 resources.
  *
  * A new instance is created for each stateful session and each stateless
  * request. Tool and resource registrations read the shared singleton
@@ -91,7 +91,7 @@ function createMcpServer(): McpServer {
     version: "1.0.0",
   });
 
-  // ── Tools (42 total) — actions that read or mutate storage ──
+  // ── Tools (35 total) — actions that read or mutate storage ──
   registerBlobTools(server);
   registerTableTools(server);
   registerQueueTools(server);

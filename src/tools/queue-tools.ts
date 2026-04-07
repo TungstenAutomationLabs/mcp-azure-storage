@@ -1,8 +1,12 @@
 /**
- * Azure Queue Storage MCP tools — 8 tools.
+ * Azure Queue Storage MCP tools — 6 tools.
  *
- * Provides queue management (list, create, delete, get-properties) and
- * message operations (send, peek, receive, delete).
+ * Provides queue management (create, delete) and message operations
+ * (send, peek, receive, delete).
+ *
+ * Note: Queue listing and queue properties are provided by the
+ * `azure-queue:///queues` and `azure-queue:///queues/{queueName}/properties`
+ * MCP resources (see resources/queue-resources.ts).
  *
  * Queue processing follows the receive → process → delete pattern:
  *  1. `queue-receive-messages` dequeues messages and makes them invisible.
@@ -23,7 +27,7 @@ import {
 import { getStorageConfig } from "../config.js";
 
 /**
- * Register all 8 Queue Storage tools on the given MCP server.
+ * Register all 6 Queue Storage tools on the given MCP server.
  *
  * Creates a singleton QueueServiceClient that reuses the internal HTTP
  * connection pool across all tool invocations.
@@ -41,17 +45,6 @@ export function registerQueueTools(server: McpServer): void {
   const queueServiceClient = new QueueServiceClient(queueServiceUrl, credential);
 
   // ── QUEUE MANAGEMENT ─────────────────────────────────────────────────────
-
-  server.tool("queue-list", "List all queues in the storage account. Use this to discover available queues before sending or receiving messages. Returns a JSON array of queue name strings.", {}, async () => {
-    const client = queueServiceClient;
-    const queues: string[] = [];
-    for await (const queue of client.listQueues()) {
-      queues.push(queue.name);
-    }
-    return {
-      content: [{ type: "text", text: JSON.stringify(queues, null, 2) }],
-    };
-  });
 
   server.tool(
     "queue-create",
@@ -196,25 +189,4 @@ export function registerQueueTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    "queue-get-properties",
-    "Get properties for a queue, including the approximate number of pending messages. Use this to check queue depth before processing or to monitor backlog. Returns JSON with 'queueName' and 'approximateMessagesCount'. Note: the count is approximate due to Azure's distributed architecture.",
-    { queueName: z.string().describe("Name of the queue to inspect (e.g. 'order-processing')") },
-    async ({ queueName }) => {
-      const client = queueServiceClient;
-      const queueClient = client.getQueueClient(queueName);
-      const props = await queueClient.getProperties();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              queueName,
-              approximateMessagesCount: props.approximateMessagesCount,
-            }),
-          },
-        ],
-      };
-    }
-  );
 }

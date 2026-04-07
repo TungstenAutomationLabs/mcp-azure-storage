@@ -51,31 +51,16 @@ describe("table-tools", () => {
   });
 
   describe("tool registration", () => {
-    it("registers 7 table tools", async () => {
+    it("registers 5 table tools", async () => {
       const app = createTableTestApp();
       const res = await mcpPost(app, toolListRequest()).expect(200);
 
       const tools = extractToolsList(res);
-      expect(tools).toHaveLength(7);
+      expect(tools).toHaveLength(5);
     });
   });
 
-  describe("table-list", () => {
-    it("returns tables with name and index", async () => {
-      mockListTables.mockImplementation(async function* () {
-        yield { name: "Orders" };
-        yield { name: "Users" };
-      });
-
-      const app = createTableTestApp();
-      const res = await mcpPost(app, toolCallRequest("table-list")).expect(200);
-
-      const data = extractToolJson(res);
-      expect(data).toHaveLength(2);
-      expect(data[0]).toEqual({ name: "Orders", index: 1 });
-      expect(data[1]).toEqual({ name: "Users", index: 2 });
-    });
-  });
+  // table-list removed — use azure-table:///tables resource instead
 
   describe("table-create", () => {
     it("creates table and reports status via onResponse", async () => {
@@ -150,30 +135,7 @@ describe("table-tools", () => {
     });
   });
 
-  describe("table-entity-get", () => {
-    it("returns full entity", async () => {
-      mockGetEntity.mockResolvedValue({
-        partitionKey: "region-west",
-        rowKey: "user-001",
-        email: "a@b.com",
-        timestamp: "2024-01-01T00:00:00Z",
-      });
-
-      const app = createTableTestApp();
-      const res = await mcpPost(
-        app,
-        toolCallRequest("table-entity-get", {
-          tableName: "Users",
-          partitionKey: "region-west",
-          rowKey: "user-001",
-        })
-      ).expect(200);
-
-      const data = extractToolJson(res);
-      expect(data.partitionKey).toBe("region-west");
-      expect(data.email).toBe("a@b.com");
-    });
-  });
+  // table-entity-get removed — use azure-table:///tables/{tableName}/entities/{partitionKey}/{rowKey} resource instead
 
   describe("table-entity-query", () => {
     it("queries with OData filter and top limit", async () => {

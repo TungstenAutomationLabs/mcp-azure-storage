@@ -78,12 +78,12 @@ describe("fileshare-tools", () => {
   });
 
   describe("tool registration", () => {
-    it("registers 10 fileshare tools", async () => {
+    it("registers 8 fileshare tools", async () => {
       const app = createFileShareTestApp();
       const res = await mcpPost(app, toolListRequest()).expect(200);
 
       const tools = extractToolsList(res);
-      expect(tools).toHaveLength(10);
+      expect(tools).toHaveLength(8);
     });
   });
 
@@ -138,33 +138,7 @@ describe("fileshare-tools", () => {
     });
   });
 
-  describe("fileshare-list", () => {
-    it("lists files and directories at root", async () => {
-      mockListFilesAndDirectories.mockImplementation(async function* () {
-        yield { kind: "directory", name: "reports" };
-        yield {
-          kind: "file",
-          name: "readme.txt",
-          properties: { contentLength: 256, lastModified: new Date() },
-        };
-      });
-
-      const app = createFileShareTestApp();
-      const res = await mcpPost(
-        app,
-        toolCallRequest("fileshare-list", {
-          shareName: "docs",
-          directoryPath: "",
-        })
-      ).expect(200);
-
-      const data = extractToolJson(res);
-      expect(data.items).toHaveLength(2);
-      expect(data.items[0].kind).toBe("directory");
-      expect(data.items[1].kind).toBe("file");
-      expect(data.items[1].contentLength).toBe(256);
-    });
-  });
+  // fileshare-list removed — use azure-fileshare:///shares/{shareName}/files resource instead
 
   describe("fileshare-upload-file", () => {
     it("uploads base64 content to a directory", async () => {
@@ -222,31 +196,5 @@ describe("fileshare-tools", () => {
     });
   });
 
-  describe("fileshare-get-file-properties", () => {
-    it("returns file metadata and properties", async () => {
-      mockFileGetProperties.mockResolvedValue({
-        contentLength: 1024,
-        contentType: "application/pdf",
-        lastModified: new Date("2024-06-15"),
-        fileCreatedOn: new Date("2024-01-01"),
-        metadata: { department: "sales" },
-      });
-
-      const app = createFileShareTestApp();
-      const res = await mcpPost(
-        app,
-        toolCallRequest("fileshare-get-file-properties", {
-          shareName: "docs",
-          directoryPath: "reports",
-          fileName: "report.pdf",
-        })
-      ).expect(200);
-
-      const data = extractToolJson(res);
-      expect(data.fileName).toBe("report.pdf");
-      expect(data.contentLength).toBe(1024);
-      expect(data.contentType).toBe("application/pdf");
-      expect(data.metadata.department).toBe("sales");
-    });
-  });
+  // fileshare-get-file-properties removed — use azure-fileshare:///shares/{shareName}/properties/{directoryPath}/{fileName} resource instead
 });

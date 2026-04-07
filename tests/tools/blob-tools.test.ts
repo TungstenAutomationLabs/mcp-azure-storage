@@ -73,15 +73,14 @@ describe("blob-tools", () => {
   });
 
   describe("tool registration", () => {
-    it("registers 11 blob tools", async () => {
+    it("registers 10 blob tools", async () => {
       const app = createBlobTestApp();
       const res = await mcpPost(app, toolListRequest()).expect(200);
 
       const tools = extractToolsList(res);
-      expect(tools.length).toBe(11);
+      expect(tools.length).toBe(10);
 
       const names = tools.map((t: any) => t.name);
-      expect(names).toContain("blob-container-list");
       expect(names).toContain("blob-container-create");
       expect(names).toContain("blob-read");
       expect(names).toContain("blob-create");
@@ -89,28 +88,7 @@ describe("blob-tools", () => {
     });
   });
 
-  describe("blob-container-list", () => {
-    it("returns containers from Azure", async () => {
-      mockListContainers.mockImplementation(async function* () {
-        yield {
-          name: "test-container",
-          properties: { lastModified: new Date("2024-01-01") },
-        };
-        yield {
-          name: "other-container",
-          properties: { lastModified: new Date("2024-06-15") },
-        };
-      });
-
-      const app = createBlobTestApp();
-      const res = await mcpPost(app, toolCallRequest("blob-container-list")).expect(200);
-
-      const data = extractToolJson(res);
-      expect(data).toHaveLength(2);
-      expect(data[0].name).toBe("test-container");
-      expect(data[1].name).toBe("other-container");
-    });
-  });
+  // blob-container-list removed — use azure-blob:///containers resource instead
 
   describe("blob-container-create", () => {
     it("creates container when it does not exist", async () => {

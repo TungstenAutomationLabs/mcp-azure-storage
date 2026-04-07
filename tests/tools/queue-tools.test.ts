@@ -53,29 +53,16 @@ describe("queue-tools", () => {
   });
 
   describe("tool registration", () => {
-    it("registers 8 queue tools", async () => {
+    it("registers 6 queue tools", async () => {
       const app = createQueueTestApp();
       const res = await mcpPost(app, toolListRequest()).expect(200);
 
       const tools = extractToolsList(res);
-      expect(tools).toHaveLength(8);
+      expect(tools).toHaveLength(6);
     });
   });
 
-  describe("queue-list", () => {
-    it("returns queue names as array", async () => {
-      mockListQueues.mockImplementation(async function* () {
-        yield { name: "order-processing" };
-        yield { name: "notifications" };
-      });
-
-      const app = createQueueTestApp();
-      const res = await mcpPost(app, toolCallRequest("queue-list")).expect(200);
-
-      const data = extractToolJson(res);
-      expect(data).toEqual(["order-processing", "notifications"]);
-    });
-  });
+  // queue-list removed — use azure-queue:///queues resource instead
 
   describe("queue-create", () => {
     it("creates queue idempotently", async () => {
@@ -220,23 +207,5 @@ describe("queue-tools", () => {
     });
   });
 
-  describe("queue-get-properties", () => {
-    it("returns queue properties with message count", async () => {
-      mockGetProperties.mockResolvedValue({
-        approximateMessagesCount: 42,
-      });
-
-      const app = createQueueTestApp();
-      const res = await mcpPost(
-        app,
-        toolCallRequest("queue-get-properties", {
-          queueName: "test-queue",
-        })
-      ).expect(200);
-
-      const data = extractToolJson(res);
-      expect(data.queueName).toBe("test-queue");
-      expect(data.approximateMessagesCount).toBe(42);
-    });
-  });
+  // queue-get-properties removed — use azure-queue:///queues/{queueName}/properties resource instead
 });
