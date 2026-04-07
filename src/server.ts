@@ -1,4 +1,27 @@
-import "dotenv/config";
+/**
+ * MCP Azure Storage Server — main entry point.
+ *
+ * This Express application exposes a single `/mcp` endpoint that speaks
+ * JSON-RPC 2.0 via the Model Context Protocol (MCP) Streamable HTTP transport.
+ * It supports two modes:
+ *
+ *  • **Stateful** — MCP clients (Claude, RooCode, etc.) send an `initialize`
+ *    request, which creates a persistent session with a UUID. Subsequent
+ *    requests include the `Mcp-Session-Id` header to route to the same session.
+ *
+ *  • **Stateless** — HTTP clients (Postman, curl) skip `initialize` and send
+ *    tool calls directly. A throwaway MCP server is created per request and
+ *    cleaned up immediately.
+ *
+ * Security layers applied (in order):
+ *  1. Helmet — sets security-related HTTP headers
+ *  2. Rate limiter — per-IP request throttling on /mcp
+ *  3. API key auth — validates X-API-Key or Bearer token
+ *
+ * @see {@link https://modelcontextprotocol.io/} MCP specification
+ */
+
+import "dotenv/config"; // Load .env file into process.env (local dev only; ignored in production)
 import express, { Request, Response } from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -12,20 +35,22 @@ import { registerQueueTools } from "./tools/queue-tools.js";
 import { registerFileShareTools } from "./tools/fileshare-tools.js";
 import { registerUtilityTools } from "./tools/utility-tools.js";
 
+// ── Express application ──────────────────────────────────────────────────────
 const app = express();
 
-// ── Security headers ──
+// Security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
 app.use(helmet());
 
-// ── Rate limiting ──
+// ── Rate limiting ────────────────────────────────────────────────────────────
+// Per-IP sliding window. Configurable via env vars; defaults to 300 req / 15 min.
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MINUTES || "15", 10) * 60 * 1000;
 const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || "300", 10);
 
 const limiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW_MS,
   max: RATE_LIMIT_MAX,
-  standardHeaders: true,
-  legacyHeaders: false,
+  standardHeaders: true,  // Return RateLimit-* headers (draft-6)
+  legacyHeaders: false,    // Disable X-RateLimit-* headers
   message: {
     jsonrpc: "2.0",
     error: { code: -32005, message: "Too many requests, please try again later." },
@@ -33,10 +58,19 @@ const limiter = rateLimit({
 });
 app.use("/mcp", limiter);
 
-app.use(express.json({ limit: "50mb" })); // Large payloads for base64 file content
+// Accept large JSON payloads (base64-encoded files can be tens of MB)
+app.use(express.json({ limit: "50mb" }));
+
+// ── MCP server factory ───────────────────────────────────────────────────────
 
 /**
- * Create a fresh MCP server instance with all tools registered.
+ * Create a fresh MCP server instance with all 42 tools registered.
+ *
+ * A new instance is created for each stateful session and each stateless
+ * request. Tool registrations read the shared singleton StorageConfig and
+ * SDK clients from their respective modules, so this is lightweight.
+ *
+ * @returns A fully-configured McpServer ready to connect to a transport.
  */
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -53,19 +87,32 @@ function createMcpServer(): McpServer {
   return server;
 }
 
-// ── Session management for stateful mode ──
+// ── Session management for stateful mode ─────────────────────────────────────
+//
+// Stateful MCP sessions are stored in an in-memory Map keyed by session UUID.
+// Each session holds a transport, MCP server, and a last-activity timestamp.
+//
+// Design notes:
+//  • Sessions are evicted after SESSION_TTL_MS of inactivity (default: 30 min).
+//  • A hard cap of MAX_SESSIONS prevents memory exhaustion from session floods.
+//  • Sticky sessions in the Bicep infra route the same client to the same replica.
+//  • Graceful shutdown (SIGTERM/SIGINT) closes all sessions before exiting.
+
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS || "100", 10);
 
+/** Tracks an active stateful MCP session. */
 interface ManagedSession {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
+  /** Unix timestamp (ms) of the last request on this session, used for TTL eviction. */
   lastActivity: number;
 }
 
+/** Active sessions keyed by UUID. */
 const sessions = new Map<string, ManagedSession>();
 
-// ── Session cleanup interval — evict stale sessions every 5 minutes ──
+// Periodic cleanup — runs every 5 minutes, evicts sessions idle > SESSION_TTL_MS
 const sessionCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [sid, session] of sessions) {
@@ -77,10 +124,18 @@ const sessionCleanupTimer = setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// ── API key auth on /mcp ──
+// ── API key auth on /mcp ─────────────────────────────────────────────────────
+// All /mcp routes require a valid API key. See middleware/api-key.ts.
 app.use("/mcp", apiKeyAuth);
 
-// ── POST /mcp — handles all MCP requests ──
+// ══════════════════════════════════════════════════════════════════════════════
+// POST /mcp — Main MCP request handler
+//
+// Request routing logic (in priority order):
+//  1. If Mcp-Session-Id header matches an existing session → stateful dispatch
+//  2. If the body contains an "initialize" method → create a new stateful session
+//  3. Otherwise → stateless one-shot (creates + destroys a server per request)
+// ══════════════════════════════════════════════════════════════════════════════
 app.post("/mcp", async (req: Request, res: Response) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
@@ -185,7 +240,12 @@ app.post("/mcp", async (req: Request, res: Response) => {
   }
 });
 
-// ── GET /mcp — SSE stream for server-initiated notifications (stateful) ──
+// ══════════════════════════════════════════════════════════════════════════════
+// GET /mcp — Server-Sent Events (SSE) stream for stateful sessions
+//
+// MCP clients may open a GET connection to receive server-initiated
+// notifications (e.g. progress updates). Requires a valid Mcp-Session-Id.
+// ══════════════════════════════════════════════════════════════════════════════
 app.get("/mcp", async (req: Request, res: Response) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
@@ -216,7 +276,12 @@ app.get("/mcp", async (req: Request, res: Response) => {
   }
 });
 
-// ── DELETE /mcp — close a session ──
+// ══════════════════════════════════════════════════════════════════════════════
+// DELETE /mcp — Explicitly close a stateful session
+//
+// MCP clients should call this when they're done to free server resources
+// immediately, rather than waiting for the TTL to expire.
+// ══════════════════════════════════════════════════════════════════════════════
 app.delete("/mcp", async (req: Request, res: Response) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
@@ -250,11 +315,13 @@ app.delete("/mcp", async (req: Request, res: Response) => {
   }
 });
 
-// ── Health (no auth) ──
+// ── Health check (no auth required) ──────────────────────────────────────────
+// Used by Container Apps liveness/readiness probes (see infra/main.bicep).
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "healthy" });
 });
 
+// ── Start HTTP server ────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const httpServer = app.listen(PORT, () => {
   console.log(`\n🚀 MCP Azure Storage Server v1.0.0`);
@@ -270,7 +337,11 @@ const httpServer = app.listen(PORT, () => {
   console.log(`   JSON limit   : 50mb\n`);
 });
 
-// ── Graceful shutdown — close sessions & stop accepting requests ──
+// ── Graceful shutdown ────────────────────────────────────────────────────────
+// Container Apps sends SIGTERM during scale-down or redeployment.
+// This handler drains active sessions, stops accepting new connections,
+// and force-exits after 10 seconds if connections don't close cleanly.
+
 function shutdown(signal: string) {
   console.log(`\n${signal} received — shutting down gracefully…`);
   clearInterval(sessionCleanupTimer);

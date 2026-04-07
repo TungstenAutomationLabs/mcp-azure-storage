@@ -1,3 +1,20 @@
+/**
+ * Azure File Share MCP tools — 10 tools.
+ *
+ * Provides share management (list, create, delete), directory management
+ * (create with nested parents, delete), listing (files + subdirectories),
+ * file CRUD (upload, read/download, delete), and property inspection.
+ *
+ * File content is transferred as base64 strings within JSON, the same as
+ * blob tools. Use `util-to-base64` / `util-from-base64` for text encoding.
+ *
+ * Unlike Blob Storage, File Share uses a true hierarchical directory structure.
+ * Directories must exist before files can be created in them, but the upload
+ * tool automatically creates missing parent directories.
+ *
+ * @module tools/fileshare-tools
+ */
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -6,10 +23,16 @@ import {
 } from "@azure/storage-file-share";
 import { getStorageConfig } from "../config.js";
 
+/**
+ * Register all 10 File Share tools on the given MCP server.
+ *
+ * Creates a singleton ShareServiceClient that reuses the internal HTTP
+ * connection pool across all tool invocations.
+ */
 export function registerFileShareTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  // ── Singleton client — reuses internal connection pool across all tool calls ──
+  // Singleton client — shared across all file share tool calls for connection reuse.
   const credential = new StorageSharedKeyCredential(
     config.accountName,
     config.accountKey
@@ -19,7 +42,7 @@ export function registerFileShareTools(server: McpServer): void {
     credential
   );
 
-  // ── SHARE MANAGEMENT ──
+  // ── SHARE MANAGEMENT ─────────────────────────────────────────────────────
 
   server.tool(
     "fileshare-list-shares",
@@ -84,7 +107,9 @@ export function registerFileShareTools(server: McpServer): void {
     }
   );
 
-  // ── DIRECTORY MANAGEMENT ──
+  // ── DIRECTORY MANAGEMENT ─────────────────────────────────────────────────
+  // File shares use a real hierarchical directory structure (unlike blob
+  // storage, which only has virtual directories via name prefixes).
 
   server.tool(
     "fileshare-create-directory",
@@ -150,7 +175,7 @@ export function registerFileShareTools(server: McpServer): void {
     }
   );
 
-  // ── LIST FILES & DIRECTORIES ──
+  // ── LIST FILES & DIRECTORIES ─────────────────────────────────────────────
 
   server.tool(
     "fileshare-list",
@@ -206,7 +231,10 @@ export function registerFileShareTools(server: McpServer): void {
     }
   );
 
-  // ── FILE CRUD ──
+  // ── FILE CRUD ────────────────────────────────────────────────────────────
+  // Content is transferred as base64 within JSON. The upload tool auto-creates
+  // parent directories. Azure File Share requires two API calls per upload:
+  // create (allocate size) then uploadRange (write data).
 
   server.tool(
     "fileshare-upload-file",
@@ -393,7 +421,13 @@ export function registerFileShareTools(server: McpServer): void {
   );
 }
 
-// Helper
+/**
+ * Collect a Node.js readable stream into a single Buffer.
+ * Used to download file content before base64-encoding it.
+ *
+ * @param readableStream - The stream from a file download response.
+ * @returns A Buffer containing the full stream contents.
+ */
 async function streamToBuffer(
   readableStream: NodeJS.ReadableStream
 ): Promise<Buffer> {

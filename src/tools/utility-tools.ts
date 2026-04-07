@@ -1,3 +1,17 @@
+/**
+ * Utility MCP tools — 6 tools.
+ *
+ * Provides helper operations that support the primary storage tools:
+ *  - Base64 encoding/decoding — required for text↔base64 conversion when
+ *    uploading or downloading text files via blob/fileshare tools.
+ *  - SAS token refresh — generates fresh SAS URLs/tokens for blobs and containers.
+ *  - MIME type lookup — identifies content types from file extensions.
+ *  - Container name sanitisation — converts free-form text into valid
+ *    Azure Storage container names.
+ *
+ * @module tools/utility-tools
+ */
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -9,10 +23,18 @@ import {
 } from "@azure/storage-blob";
 import { getStorageConfig } from "../config.js";
 
+/**
+ * Register all 6 utility tools on the given MCP server.
+ *
+ * These tools are stateless helpers — they don't maintain any persistent
+ * client connections (SAS generation uses short-lived credential objects).
+ */
 export function registerUtilityTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  // ── BASE64 CONVERSION ──
+  // ── BASE64 CONVERSION ────────────────────────────────────────────────────
+  // These tools bridge the gap between human-readable text and the base64
+  // format required by blob-create, blob-read, fileshare-upload, etc.
 
   server.tool(
     "util-to-base64",
@@ -74,7 +96,9 @@ export function registerUtilityTools(server: McpServer): void {
     }
   );
 
-  // ── SAS TOKEN REFRESH ──
+  // ── SAS TOKEN REFRESH ────────────────────────────────────────────────────
+  // Generate fresh SAS URLs/tokens to replace expired ones. These are
+  // standalone alternatives to the SAS tools in blob-tools.ts.
 
   server.tool(
     "util-refresh-blob-sas",
@@ -185,7 +209,7 @@ export function registerUtilityTools(server: McpServer): void {
     }
   );
 
-  // ── MIME TYPE LOOKUP ──
+  // ── MIME TYPE LOOKUP ─────────────────────────────────────────────────────
 
   server.tool(
     "util-get-content-type",
@@ -208,7 +232,9 @@ export function registerUtilityTools(server: McpServer): void {
     }
   );
 
-  // ── CONTAINER NAME SANITISER ──
+  // ── CONTAINER NAME SANITISER ─────────────────────────────────────────────
+  // Converts arbitrary text (emails, URLs, display names) into names that
+  // satisfy Azure's strict container naming rules.
 
   server.tool(
     "util-to-container-name",
@@ -244,7 +270,13 @@ export function registerUtilityTools(server: McpServer): void {
 }
 
 /**
- * MIME type lookup
+ * Determine the MIME content type from a filename or bare extension.
+ *
+ * Extracts the extension from the last path segment, looks it up in a
+ * static map of common types, and falls back to "application/octet-stream".
+ *
+ * @param filename - File name, path, or bare extension (e.g. "pdf").
+ * @returns The MIME type string.
  */
 function determineContentType(filename: string): string {
   const extension =

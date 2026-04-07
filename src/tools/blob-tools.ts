@@ -1,3 +1,16 @@
+/**
+ * Azure Blob Storage MCP tools — 11 tools.
+ *
+ * Provides container management (list, create, delete, exists), blob CRUD
+ * (list, create/upload, read/download, delete, set-metadata), and SAS token
+ * generation (blob-level and container-level).
+ *
+ * All blob content is transferred as base64 strings within JSON.
+ * Use `util-to-base64` / `util-from-base64` for text encoding/decoding.
+ *
+ * @module tools/blob-tools
+ */
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -10,10 +23,19 @@ import {
 } from "@azure/storage-blob";
 import { getStorageConfig } from "../config.js";
 
+/**
+ * Register all 11 Blob Storage tools on the given MCP server.
+ *
+ * Creates a singleton BlobServiceClient that reuses the internal HTTP
+ * connection pool across all tool invocations for better performance.
+ */
 export function registerBlobTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  // ── Singleton client — reuses internal connection pool across all tool calls ──
+  // Singleton client — created once, shared across all tool calls.
+  // Azure SDK clients manage an internal HTTP pipeline with connection
+  // pooling, retry policies, and telemetry. Reusing them avoids the
+  // overhead of recreating these on every request.
   const credential = new StorageSharedKeyCredential(
     config.accountName,
     config.accountKey
@@ -468,10 +490,21 @@ export function registerBlobTools(server: McpServer): void {
   );
 }
 
-// ──────────────────────────────────────────────────────────────
-// HELPER FUNCTIONS
-// ──────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS (module-private)
+// ══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Generate a SAS (Shared Access Signature) query string for a specific blob.
+ *
+ * @param accountName  - Storage account name.
+ * @param accountKey   - Storage account shared key.
+ * @param containerName - Target container.
+ * @param blobName     - Target blob (including virtual directory path).
+ * @param expiryHours  - Hours from now until the SAS token expires.
+ * @param permissions  - SAS permission string (e.g. "r", "rwd").
+ * @returns The SAS query string (without leading '?').
+ */
 function generateBlobSas(
   accountName: string,
   accountKey: string,
@@ -497,6 +530,13 @@ function generateBlobSas(
   ).toString();
 }
 
+/**
+ * Collect a Node.js readable stream into a single Buffer.
+ * Used to download blob content before base64-encoding it.
+ *
+ * @param readableStream - The stream from a blob download response.
+ * @returns A Buffer containing the full stream contents.
+ */
 async function streamToBuffer(
   readableStream: NodeJS.ReadableStream
 ): Promise<Buffer> {
@@ -510,6 +550,15 @@ async function streamToBuffer(
   });
 }
 
+/**
+ * Determine the MIME content type from a filename's extension.
+ *
+ * Extracts the extension from the last path segment, looks it up in a
+ * static map of common types, and falls back to "application/octet-stream".
+ *
+ * @param filename - File name or path (e.g. "reports/summary.pdf").
+ * @returns The MIME type string (e.g. "application/pdf").
+ */
 function determineContentType(filename: string): string {
   const extension = filename.split(/[/\\]/).pop()?.split(".").pop()?.toLowerCase() || "";
   const mimeTypes: Record<string, string> = {

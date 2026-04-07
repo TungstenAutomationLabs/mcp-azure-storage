@@ -1,3 +1,19 @@
+/**
+ * Azure Table Storage MCP tools — 7 tools.
+ *
+ * Provides table management (list, create, delete) and entity CRUD
+ * (upsert, get, query, delete).
+ *
+ * Table Storage is a schemaless NoSQL key-value store. Each entity is
+ * identified by a composite key: (partitionKey, rowKey). Entities within
+ * the same partition are stored together for efficient querying.
+ *
+ * The upsert operation uses "Merge" semantics — existing properties not
+ * included in the request are preserved (not deleted).
+ *
+ * @module tools/table-tools
+ */
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -7,10 +23,16 @@ import {
 } from "@azure/data-tables";
 import { getStorageConfig } from "../config.js";
 
+/**
+ * Register all 7 Table Storage tools on the given MCP server.
+ *
+ * Creates a singleton TableServiceClient for management operations and
+ * caches per-table TableClients for entity operations.
+ */
 export function registerTableTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  // ── Singleton credential + service client — reuses connections across all tool calls ──
+  // Singleton credential + service client — shared across all table management calls.
   const credential = new AzureNamedKeyCredential(
     config.accountName,
     config.accountKey
@@ -20,8 +42,17 @@ export function registerTableTools(server: McpServer): void {
     credential
   );
 
-  // TableClient is per-table, but we cache them to reuse connections
+  // Per-table clients are cached in a Map. Unlike the service client,
+  // TableClient is scoped to a single table, so we create one per table
+  // name and reuse it for all entity operations on that table.
   const tableClientCache = new Map<string, TableClient>();
+
+  /**
+   * Get or create a cached TableClient for the given table name.
+   *
+   * @param tableName - The table to get a client for.
+   * @returns A reusable TableClient instance.
+   */
   function getTableClient(tableName: string): TableClient {
     let client = tableClientCache.get(tableName);
     if (!client) {
@@ -35,7 +66,7 @@ export function registerTableTools(server: McpServer): void {
     return client;
   }
 
-  // ── TABLE MANAGEMENT ──
+  // ── TABLE MANAGEMENT ─────────────────────────────────────────────────────
 
   server.tool("table-list", "List all tables in the storage account. Use this to discover available tables before performing entity operations. Returns an array of objects with 'name' and 'index' (1-based) for each table.", {}, async () => {
     const client = tableServiceClient;
@@ -85,7 +116,9 @@ export function registerTableTools(server: McpServer): void {
     }
   );
 
-  // ── ENTITY CRUD ──
+  // ── ENTITY CRUD ──────────────────────────────────────────────────────────
+  // Entities are identified by (partitionKey, rowKey). All entity operations
+  // use the cached per-table TableClient for connection reuse.
 
   server.tool(
     "table-entity-upsert",

@@ -1,3 +1,19 @@
+/**
+ * Azure Queue Storage MCP tools — 8 tools.
+ *
+ * Provides queue management (list, create, delete, get-properties) and
+ * message operations (send, peek, receive, delete).
+ *
+ * Queue processing follows the receive → process → delete pattern:
+ *  1. `queue-receive-messages` dequeues messages and makes them invisible.
+ *  2. The caller processes each message.
+ *  3. `queue-delete-message` permanently removes processed messages.
+ *  4. If delete is not called within the visibility timeout, the message
+ *     reappears in the queue for retry (at-least-once delivery).
+ *
+ * @module tools/queue-tools
+ */
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -6,10 +22,16 @@ import {
 } from "@azure/storage-queue";
 import { getStorageConfig } from "../config.js";
 
+/**
+ * Register all 8 Queue Storage tools on the given MCP server.
+ *
+ * Creates a singleton QueueServiceClient that reuses the internal HTTP
+ * connection pool across all tool invocations.
+ */
 export function registerQueueTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  // ── Singleton client — reuses internal connection pool across all tool calls ──
+  // Singleton client — shared across all queue tool calls for connection reuse.
   const credential = new StorageSharedKeyCredential(
     config.accountName,
     config.accountKey
@@ -19,7 +41,7 @@ export function registerQueueTools(server: McpServer): void {
     credential
   );
 
-  // ── QUEUE MANAGEMENT ──
+  // ── QUEUE MANAGEMENT ─────────────────────────────────────────────────────
 
   server.tool("queue-list", "List all queues in the storage account. Use this to discover available queues before sending or receiving messages. Returns a JSON array of queue name strings.", {}, async () => {
     const client = queueServiceClient;
@@ -60,7 +82,9 @@ export function registerQueueTools(server: McpServer): void {
     }
   );
 
-  // ── MESSAGE OPERATIONS ──
+  // ── MESSAGE OPERATIONS ───────────────────────────────────────────────────
+  // Messages follow the receive → process → delete pattern.
+  // peek is a read-only preview; receive hides messages for processing.
 
   server.tool(
     "queue-send-message",

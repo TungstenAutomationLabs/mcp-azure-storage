@@ -1,4 +1,33 @@
+// =============================================================================
+// MCP Azure Storage Server — Infrastructure as Code (Bicep)
+//
+// Provisions all Azure resources needed to run the MCP server:
+//   1. Log Analytics Workspace — centralised logging for Container Apps
+//   2. Azure Container Registry (ACR) — stores the Docker image
+//   3. Container Apps Environment — managed Kubernetes hosting layer
+//   4. Storage Account — the Azure Storage account the MCP tools operate on
+//   5. Container App — the running MCP server instance
+//   6. RBAC Role Assignments — least-privilege access for the app identity
+//
+// Deployed via Azure Developer CLI:
+//   azd up        — provision infrastructure + build & deploy container
+//   azd deploy    — rebuild & redeploy container only
+//   azd down      — tear down all resources
+//
+// The template uses a system-assigned managed identity on the Container App
+// and grants it AcrPull, Blob/Queue/Table Data Contributor roles so the
+// server can pull its image and access storage without storing credentials
+// (except the shared key, which is needed by the Azure Storage SDK for
+// SharedKey auth and SAS token generation).
+// =============================================================================
+
 targetScope = 'resourceGroup'
+
+// ── Parameters ────────────────────────────────────────────────
+// location:        Azure region; defaults to the resource group's location.
+// environmentName: Base name used to derive all child resource names (e.g. "mcp-storage").
+// containerImage:  Fully-qualified image reference; overridden by azd during deployment.
+// mcpApiKey:       Bearer token clients must present to authenticate MCP requests.
 
 param location string = resourceGroup().location
 param environmentName string
@@ -8,6 +37,9 @@ param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 param mcpApiKey string
 
 // ── Log Analytics (required by Container Apps Environment) ────
+// Container Apps require a Log Analytics workspace for application and system
+// logs. PerGB2018 pricing tier is the most common pay-as-you-go option.
+// Logs are retained for 30 days to balance cost and debuggability.
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${environmentName}-logs'
   location: location
@@ -18,6 +50,9 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 }
 
 // ── Azure Container Registry ─────────────────────────────────
+// Stores the MCP server Docker image. The Basic SKU is sufficient for low-
+// throughput dev/test scenarios. Admin user is disabled — image pulls use
+// the Container App's managed identity via the AcrPull role assignment below.
 resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: '${replace(environmentName, '-', '')}acr'
   location: location
@@ -28,6 +63,10 @@ resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' =
 }
 
 // ── Container Apps Environment ───────────────────────────────
+// The managed environment is the shared hosting plane for one or more
+// Container Apps. It handles networking, DNS, and log routing. All apps
+// in the same environment share the same virtual network and Log Analytics
+// workspace.
 resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${environmentName}-env'
   location: location
@@ -43,6 +82,10 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
 }
 
 // ── Storage Account ──────────────────────────────────────────
+// The Azure Storage account that the MCP tools read from and write to.
+// - Standard_LRS: locally-redundant storage (cheapest; upgrade to GRS for production).
+// - StorageV2: supports Blob, Queue, Table, and File Share services.
+// - HTTPS-only with TLS 1.2 minimum for security compliance.
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: '${replace(environmentName, '-', '')}stor'
   location: location
@@ -56,30 +99,46 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 }
 
 // ── Container App ────────────────────────────────────────────
+// The main application resource. Runs the MCP server Docker image as a
+// serverless container with automatic HTTPS, health probes, and auto-scaling.
+// A system-assigned managed identity is used for passwordless access to ACR
+// and (in future) Azure Storage RBAC.
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${environmentName}-mcp'
   location: location
   identity: {
-    type: 'SystemAssigned'
+    type: 'SystemAssigned'   // Creates an AAD service principal tied to this app
   }
   properties: {
     managedEnvironmentId: containerAppEnv.id
     configuration: {
+      // Multiple revision mode is required for sticky sessions (session affinity).
+      // It allows multiple revisions to coexist during rolling deployments while
+      // maintaining client-to-replica routing for stateful MCP sessions.
+      activeRevisionsMode: 'Multiple'
+      // ── Ingress ──
+      // External ingress exposes the app on a public *.azurecontainerapps.io URL
+      // with automatic HTTPS and a managed TLS certificate.
       ingress: {
         external: true
-        targetPort: 3000
-        transport: 'http'
-        // Automatic HTTPS + managed TLS cert on *.azurecontainerapps.io
+        targetPort: 3000         // Must match the Express PORT in Dockerfile
+        transport: 'http'        // Container speaks plain HTTP; the platform terminates TLS
         stickySessions: {
-          affinity: 'sticky'   // Route same client to same replica (preserves stateful MCP sessions)
+          affinity: 'sticky'     // Route same client to same replica (preserves stateful MCP sessions)
         }
       }
+      // ── Registry ──
+      // Pull images from our private ACR using the app's managed identity
+      // (no admin credentials needed — see AcrPull role assignment below).
       registries: [
         {
           server: containerRegistry.properties.loginServer
           identity: 'system'
         }
       ]
+      // ── Secrets ──
+      // Secrets are encrypted at rest and injected as env vars via secretRef.
+      // They are NOT exposed in template definitions or Azure Portal UI.
       secrets: [
         {
           name: 'mcp-api-key'
@@ -95,11 +154,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'mcp-server'
-          image: containerImage
+          image: containerImage        // Overridden by azd deploy with the real ACR image
           resources: {
-            cpu: json('0.5')
-            memory: '1Gi'
+            cpu: json('0.5')           // 0.5 vCPU per replica (min for Container Apps)
+            memory: '1Gi'              // 1 GiB RAM per replica
           }
+          // ── Environment Variables ──
+          // Plain values and secret references are injected into the container.
+          // The MCP server reads these in src/config.ts via getStorageConfig().
           env: [
             {
               name: 'AZURE_STORAGE_ACCOUNT_NAME'
@@ -107,13 +169,17 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             }
             {
               name: 'AZURE_STORAGE_ACCOUNT_KEY'
-              secretRef: 'storage-account-key'
+              secretRef: 'storage-account-key'   // Injected from secrets array above
             }
             {
               name: 'MCP_API_KEY'
-              secretRef: 'mcp-api-key'
+              secretRef: 'mcp-api-key'           // Injected from secrets array above
             }
           ]
+          // ── Health Probes ──
+          // Liveness: detects deadlocked/crashed processes → restarts the container.
+          // Readiness: gates traffic until the server is ready to accept requests.
+          // Both hit the /health endpoint defined in server.ts.
           probes: [
             {
               type: 'Liveness'
@@ -121,7 +187,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                 path: '/health'
                 port: 3000
               }
-              periodSeconds: 30
+              periodSeconds: 30          // Check every 30 s
             }
             {
               type: 'Readiness'
@@ -129,12 +195,16 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                 path: '/health'
                 port: 3000
               }
-              initialDelaySeconds: 5
-              periodSeconds: 10
+              initialDelaySeconds: 5     // Wait 5 s after start before first check
+              periodSeconds: 10          // Then check every 10 s
             }
           ]
         }
       ]
+      // ── Auto-scaling ──
+      // minReplicas: 0 allows scale-to-zero when idle (cost saving).
+      // maxReplicas: 5 caps horizontal scaling.
+      // HTTP rule: add a replica when concurrent requests per replica exceed 20.
       scale: {
         minReplicas: 0
         maxReplicas: 5
@@ -143,7 +213,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             name: 'http-scaling'
             http: {
               metadata: {
-                concurrentRequests: '20'   // Scale up when requests per replica exceed 20
+                concurrentRequests: '20'
               }
             }
           }
@@ -153,7 +223,23 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
+// =============================================================================
+// RBAC Role Assignments
+//
+// Each assignment grants the Container App's managed identity a built-in Azure
+// role, scoped to the specific resource. This follows the principle of least
+// privilege — the app can only perform the actions it needs.
+//
+// Role GUIDs are well-known Azure built-in role definition IDs:
+//   7f951dda-...  = AcrPull
+//   ba92f5b4-...  = Storage Blob Data Contributor
+//   974c5e8b-...  = Storage Queue Data Contributor
+//   0a9a7e1f-...  = Storage Table Data Contributor
+// =============================================================================
+
 // ── Role: AcrPull — let Container App pull images from ACR ───
+// Without this, the container runtime cannot download the Docker image from
+// our private registry. Scoped to the ACR resource only.
 resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(containerRegistry.id, containerApp.id, '7f951dda-4ed3-4680-a7ca-43fe172d538d')
   scope: containerRegistry
@@ -165,6 +251,8 @@ resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-
 }
 
 // ── Role: Storage Blob Data Contributor ──────────────────────
+// Grants read/write/delete access to blob containers and blobs.
+// Used by blob-tools.ts for container and blob operations.
 resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, containerApp.id, 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
   scope: storageAccount
@@ -176,6 +264,8 @@ resource blobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01'
 }
 
 // ── Role: Storage Queue Data Contributor ─────────────────────
+// Grants read/write/delete access to queues and messages.
+// Used by queue-tools.ts for queue CRUD and message processing.
 resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, containerApp.id, '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
   scope: storageAccount
@@ -187,6 +277,8 @@ resource queueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
 }
 
 // ── Role: Storage Table Data Contributor ─────────────────────
+// Grants read/write/delete access to tables and entities.
+// Used by table-tools.ts for table CRUD and entity queries.
 resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, containerApp.id, '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
   scope: storageAccount
@@ -198,7 +290,16 @@ resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
 }
 
 // ── Outputs ──────────────────────────────────────────────────
-// azd uses AZURE_CONTAINER_REGISTRY_ENDPOINT to know where to push images
+// These values are captured by azd and stored in .azure/<env>/.env for
+// subsequent commands. They are also displayed in `azd show` output.
+
+// AZURE_CONTAINER_REGISTRY_ENDPOINT: azd uses this to know where to push
+// Docker images during `azd deploy`. Must be an output with this exact name.
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerRegistry.properties.loginServer
+
+// mcpEndpoint: the full URL clients use to connect to the MCP server.
 output mcpEndpoint string = 'https://${containerApp.properties.configuration.ingress.fqdn}/mcp'
+
+// storageAccountName: the provisioned storage account name (useful for
+// local development configuration in .env files).
 output storageAccountName string = storageAccount.name
