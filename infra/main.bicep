@@ -232,7 +232,7 @@ var resolvedStorageAccountKey = useExistingStorage ? existingStorageAccountKey :
 // completed BEFORE this resource is created (via dependsOn), eliminating
 // the circular dependency that previously caused UNAUTHORIZED errors.
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: '${environmentName}-mcp'
+  name: toLower('${environmentName}-mcp')
   location: location
   tags: {
     'azd-service-name': 'mcp-server'   // Required: maps this resource to the service in azure.yaml
