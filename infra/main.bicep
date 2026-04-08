@@ -264,6 +264,16 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: true
         targetPort: 3000         // Must match the Express PORT in Dockerfile
         transport: 'http'        // Container speaks plain HTTP; the platform terminates TLS
+        // ── Sticky Sessions ──
+        // MCP stateful sessions store state in-memory on a specific replica.
+        // Without affinity, the load balancer may route subsequent requests
+        // (carrying the same Mcp-Session-Id) to a different replica that has
+        // no knowledge of that session, causing "session not found" errors.
+        // Sticky sessions use a cookie to pin a client to the same replica
+        // for the duration of the session.
+        stickySessions: {
+          affinity: 'sticky'
+        }
       }
       // ── Registry ──
       // ACR is configured here using the user-assigned managed identity.

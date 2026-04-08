@@ -78,6 +78,14 @@ if (CORS_ENABLED) {
 // Security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
 app.use(helmet());
 
+// ── Keep-alive settings ──────────────────────────────────────────────────────
+// Azure Container Apps has a ~240 s idle timeout on ingress connections. SSE
+// streams that go idle (no tool calls) would be silently killed by the reverse
+// proxy before reaching the Node process, causing clients to "lose connection"
+// with no error in server logs. We send periodic SSE comments (": keepalive")
+// to prevent this. The interval must be shorter than the proxy timeout.
+const SSE_KEEPALIVE_INTERVAL_MS = parseInt(process.env.SSE_KEEPALIVE_INTERVAL_MS || "30000", 10); // 30s default
+
 // ── Rate limiting ────────────────────────────────────────────────────────────
 // Per-IP sliding window. Configurable via env vars; defaults to 300 req / 15 min.
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MINUTES || "15", 10) * 60 * 1000;
@@ -203,6 +211,21 @@ app.post("/mcp", async (req: Request, res: Response) => {
     return;
   }
 
+  // ─── Reject stale/invalid session IDs ───
+  // If the client sends an Mcp-Session-Id that doesn't match any active session
+  // (e.g. after a scale-down, redeployment, or TTL expiry), return a clear error
+  // instead of silently falling through to stateless mode.
+  if (sessionId) {
+    res.status(404).json({
+      jsonrpc: "2.0",
+      error: {
+        code: -32000,
+        message: `Session not found: ${sessionId}. The session may have expired or the server may have restarted. Send a new initialize request to create a fresh session.`,
+      },
+    });
+    return;
+  }
+
   // ─── Detect if this is an initialize request ───
   const body = req.body;
   const isInitialize =
@@ -307,9 +330,31 @@ app.get("/mcp", async (req: Request, res: Response) => {
 
   const session = sessions.get(sessionId)!;
   session.lastActivity = Date.now(); // refresh TTL
+
+  // ── SSE keepalive heartbeat ──
+  // Azure Container Apps / Front Door closes idle connections after ~240 seconds.
+  // We send periodic SSE comment lines (": keepalive\n\n") which are ignored by
+  // SSE parsers but keep the TCP connection alive through the reverse proxy.
+  // The timer is cleared when the response closes (client disconnect or session end).
+  const keepaliveTimer = setInterval(() => {
+    if (!res.writableEnded) {
+      try {
+        res.write(": keepalive\n\n");
+        session.lastActivity = Date.now(); // refresh TTL on keepalive too
+      } catch {
+        clearInterval(keepaliveTimer);
+      }
+    } else {
+      clearInterval(keepaliveTimer);
+    }
+  }, SSE_KEEPALIVE_INTERVAL_MS);
+
+  res.on("close", () => clearInterval(keepaliveTimer));
+
   try {
     await session.transport.handleRequest(req, res);
   } catch (error: unknown) {
+    clearInterval(keepaliveTimer);
     const message = error instanceof Error ? error.message : "Internal error";
     console.error("SSE stream error:", error);
     if (!res.headersSent) {

@@ -542,7 +542,7 @@ Both options provision via Bicep:
 - **Azure Container Registry** (Basic SKU, admin-user disabled)
 - **User-Assigned Managed Identity** — created before the Container App to break the ACR pull circular dependency
 - **Azure Storage Account** (Standard_LRS, TLS 1.2)
-- **Azure Container App** with auto-HTTPS on `*.azurecontainerapps.io`, placeholder image on first provision
+- **Azure Container App** with auto-HTTPS on `*.azurecontainerapps.io`, sticky sessions, placeholder image on first provision
 - **RBAC** — AcrPull + Blob, Queue, and Table Data Contributor roles (all assigned before the Container App is created)
 - **Secrets** — MCP_API_KEY and Storage Account Key injected securely
 
@@ -628,8 +628,19 @@ azd down --purge
 | `RATE_LIMIT_WINDOW_MINUTES` | No | `15` | Rate limit window (minutes) |
 | `RATE_LIMIT_MAX_REQUESTS` | No | `300` | Max requests per window per IP |
 | `MAX_SESSIONS` | No | `100` | Maximum concurrent stateful MCP sessions (returns 503 when full) |
+| `SSE_KEEPALIVE_INTERVAL_MS` | No | `30000` | Interval (ms) between SSE keepalive heartbeats. Prevents Azure reverse proxy from killing idle SSE connections (~240s timeout). |
 
 > **Note:** The Azure deployment uses `minReplicas: 1` to keep at least one replica always running, ensuring consistent response times and no cold-start connection drops. The Container App auto-scales up to 5 replicas under load (HTTP concurrency threshold: 20 requests). If you want to reduce costs in a non-production environment, you can set `minReplicas: 0` in [`infra/main.bicep`](infra/main.bicep:328), but be aware that scale-to-zero causes 10–30 second cold starts that may time out HTTP clients like Postman.
+
+### Connection Stability (Azure Container Apps)
+
+The deployment includes three mechanisms to ensure reliable connections:
+
+1. **Sticky sessions** — The Bicep ingress configures `stickySessions.affinity: 'sticky'` so all requests from the same client are routed to the same replica. Without this, stateful MCP sessions (stored in-memory) would break when the load balancer routes a request to a different replica.
+
+2. **SSE keepalive heartbeats** — Azure Container Apps has a ~240 second idle timeout on ingress connections. SSE streams (used by stateful MCP sessions for server-initiated notifications) that go idle would be silently killed by the reverse proxy. The server sends periodic SSE comments (`: keepalive`) every 30 seconds to keep the connection alive. Configure via `SSE_KEEPALIVE_INTERVAL_MS`.
+
+3. **Stale session detection** — If a client sends a `Mcp-Session-Id` that no longer exists (e.g. after server restart, scale event, or TTL expiry), the server returns a clear `404` error instead of silently falling through to stateless mode. Clients should handle this by sending a new `initialize` request.
 
 ---
 
