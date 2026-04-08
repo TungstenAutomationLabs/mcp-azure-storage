@@ -425,6 +425,7 @@ const httpServer = app.listen(PORT, () => {
   console.log(`   Rate limit   : ${RATE_LIMIT_MAX} req / ${RATE_LIMIT_WINDOW_MS / 60000} min per IP`);
   console.log(`   Session TTL  : ${SESSION_TTL_MS / 60000} minutes`);
   console.log(`   Max sessions : ${MAX_SESSIONS}`);
+  console.log(`   SSE keepalive: ${SSE_KEEPALIVE_INTERVAL_MS / 1000}s`);
   console.log(`   JSON limit   : 50mb\n`);
 });
 
