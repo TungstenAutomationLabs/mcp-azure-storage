@@ -20,6 +20,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { formatSchema, formatResponse } from "../utils/format.js";
 import {
   QueueServiceClient,
   StorageSharedKeyCredential,
@@ -49,28 +50,24 @@ export function registerQueueTools(server: McpServer): void {
   server.tool(
     "queue-create",
     "Create a new queue if it doesn't already exist. Idempotent — safe to call even if the queue already exists. Use this before sending messages to a new queue.",
-    { queueName: z.string().describe("Queue name (lowercase letters, digits, and hyphens, 3-63 chars, e.g. 'order-processing')") },
-    async ({ queueName }) => {
+    { queueName: z.string().describe("Queue name (lowercase letters, digits, and hyphens, 3-63 chars, e.g. 'order-processing')"), format: formatSchema },
+    async ({ queueName, format }) => {
       const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       await queueClient.createIfNotExists();
-      return {
-        content: [{ type: "text", text: `Queue "${queueName}" ready.` }],
-      };
+      return formatResponse({ status: "ready", queueName }, format, "Queue Created");
     }
   );
 
   server.tool(
     "queue-delete",
     "Permanently delete a queue and ALL messages in it. WARNING: This is irreversible — all pending messages will be lost. Check the azure-queue:///queues/{queueName}/properties resource for the message count before deleting.",
-    { queueName: z.string().describe("Name of the queue to delete (e.g. 'order-processing')") },
-    async ({ queueName }) => {
+    { queueName: z.string().describe("Name of the queue to delete (e.g. 'order-processing')"), format: formatSchema },
+    async ({ queueName, format }) => {
       const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       await queueClient.delete();
-      return {
-        content: [{ type: "text", text: `Deleted queue "${queueName}".` }],
-      };
+      return formatResponse({ success: true, deleted: queueName }, format, "Queue Deleted");
     }
   );
 
@@ -89,25 +86,19 @@ export function registerQueueTools(server: McpServer): void {
         .optional()
         .default(-1)
         .describe("Time-to-live in seconds before the message auto-expires. Use -1 for no expiry (default), or a positive value like 3600 for 1 hour."),
+      format: formatSchema,
     },
-    async ({ queueName, message, ttlSeconds }) => {
+    async ({ queueName, message, ttlSeconds, format }) => {
       const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       const result = await queueClient.sendMessage(message, {
         messageTimeToLive: ttlSeconds,
       });
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              messageId: result.messageId,
-              expiresOn: result.expiresOn,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        success: true,
+        messageId: result.messageId,
+        expiresOn: result.expiresOn,
+      }, format, "Message Sent");
     }
   );
 
@@ -117,8 +108,9 @@ export function registerQueueTools(server: McpServer): void {
     {
       queueName: z.string().describe("Name of the queue to peek into (e.g. 'order-processing')"),
       count: z.number().optional().default(5).describe("Number of messages to peek at (1-32, default: 5)"),
+      format: formatSchema,
     },
-    async ({ queueName, count }) => {
+    async ({ queueName, count, format }) => {
       const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       const response = await queueClient.peekMessages({ numberOfMessages: Math.min(count, 32) });
@@ -129,9 +121,7 @@ export function registerQueueTools(server: McpServer): void {
         expiresOn: m.expiresOn,
         dequeueCount: m.dequeueCount,
       }));
-      return {
-        content: [{ type: "text", text: JSON.stringify(messages, null, 2) }],
-      };
+      return formatResponse(messages, format, "Peeked Messages");
     }
   );
 
@@ -146,8 +136,9 @@ export function registerQueueTools(server: McpServer): void {
         .optional()
         .default(30)
         .describe("Seconds the message stays hidden from other receivers while you process it (default: 30). Set higher for long-running tasks."),
+      format: formatSchema,
     },
-    async ({ queueName, count, visibilityTimeoutSeconds }) => {
+    async ({ queueName, count, visibilityTimeoutSeconds, format }) => {
       const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       const response = await queueClient.receiveMessages({
@@ -160,9 +151,7 @@ export function registerQueueTools(server: McpServer): void {
         messageText: m.messageText,
         dequeueCount: m.dequeueCount,
       }));
-      return {
-        content: [{ type: "text", text: JSON.stringify(messages, null, 2) }],
-      };
+      return formatResponse(messages, format, "Received Messages");
     }
   );
 
@@ -173,19 +162,13 @@ export function registerQueueTools(server: McpServer): void {
       queueName: z.string().describe("Name of the queue containing the message (e.g. 'order-processing')"),
       messageId: z.string().describe("Message ID returned by 'queue-receive-messages' (e.g. '2f43b...')"),
       popReceipt: z.string().describe("Pop receipt returned by 'queue-receive-messages' — required to prove this receiver owns the message lock"),
+      format: formatSchema,
     },
-    async ({ queueName, messageId, popReceipt }) => {
+    async ({ queueName, messageId, popReceipt, format }) => {
       const client = queueServiceClient;
       const queueClient = client.getQueueClient(queueName);
       await queueClient.deleteMessage(messageId, popReceipt);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ success: true, deletedMessageId: messageId }),
-          },
-        ],
-      };
+      return formatResponse({ success: true, deletedMessageId: messageId }, format, "Message Deleted");
     }
   );
 

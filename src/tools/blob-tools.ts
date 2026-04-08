@@ -16,6 +16,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { formatSchema, formatResponse } from "../utils/format.js";
 import {
   BlobServiceClient,
   StorageSharedKeyCredential,
@@ -123,14 +124,13 @@ export function registerBlobTools(server: McpServer): void {
     "Check whether a blob container exists in the storage account. Use this to verify a container before attempting operations on it. Returns JSON with a boolean 'exists' field.",
     {
       containerName: z.string().describe("Name of the container to check (e.g. 'my-data-2024')"),
+      format: formatSchema,
     },
-    async ({ containerName }) => {
+    async ({ containerName, format }) => {
       const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const exists = await containerClient.exists();
-      return {
-        content: [{ type: "text", text: JSON.stringify({ exists }) }],
-      };
+      return formatResponse({ exists }, format, "Container Exists");
     }
   );
 
@@ -153,8 +153,9 @@ export function registerBlobTools(server: McpServer): void {
         .optional()
         .default(true)
         .describe("When true, includes custom metadata key-value pairs in each result object"),
+      format: formatSchema,
     },
-    async ({ containerName, directory, includeMetadata }) => {
+    async ({ containerName, directory, includeMetadata, format }) => {
       const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
 
@@ -208,9 +209,7 @@ export function registerBlobTools(server: McpServer): void {
           results.push(item);
         }
       }
-      return {
-        content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
-      };
+      return formatResponse(results, format, "Blobs");
     }
   );
 
@@ -227,8 +226,9 @@ export function registerBlobTools(server: McpServer): void {
         .record(z.string(), z.string())
         .optional()
         .describe("Optional custom metadata as key-value string pairs (e.g. {\"author\": \"Alice\", \"department\": \"Sales\"})"),
+      format: formatSchema,
     },
-    async ({ containerName, blobName, contentBase64, metadata }) => {
+    async ({ containerName, blobName, contentBase64, metadata, format }) => {
       const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const blockBlobClient = containerClient.getBlockBlobClient(blobName);
@@ -244,20 +244,13 @@ export function registerBlobTools(server: McpServer): void {
         await blockBlobClient.setMetadata(metadata);
       }
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              blobName,
-              contentType,
-              size: buffer.length,
-              metadataSet: metadata ? Object.keys(metadata).length : 0,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        success: true,
+        blobName,
+        contentType,
+        size: buffer.length,
+        metadataSet: metadata ? Object.keys(metadata).length : 0,
+      }, format, "Blob Created");
     }
   );
 
@@ -277,8 +270,9 @@ export function registerBlobTools(server: McpServer): void {
         .optional()
         .default(24)
         .describe("Hours until the SAS URL expires (only used when returnUrl=true, default: 24)"),
+      format: formatSchema,
     },
-    async ({ containerName, blobName, returnUrl, sasExpiryHours }) => {
+    async ({ containerName, blobName, returnUrl, sasExpiryHours, format }) => {
       const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
 
@@ -292,14 +286,7 @@ export function registerBlobTools(server: McpServer): void {
           sasExpiryHours
         );
         const url = `https://${config.accountName}.blob.core.windows.net/${containerName}/${blobName}?${sasToken}`;
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ url, expiresInHours: sasExpiryHours }),
-            },
-          ],
-        };
+        return formatResponse({ url, expiresInHours: sasExpiryHours }, format, "Blob SAS URL");
       }
 
       // Return base64 content
@@ -310,19 +297,12 @@ export function registerBlobTools(server: McpServer): void {
       );
       const base64 = buffer.toString("base64");
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              blobName,
-              contentType: downloadResponse.contentType,
-              size: buffer.length,
-              contentBase64: base64,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        blobName,
+        contentType: downloadResponse.contentType,
+        size: buffer.length,
+        contentBase64: base64,
+      }, format, "Blob Content");
     }
   );
 
@@ -332,20 +312,14 @@ export function registerBlobTools(server: McpServer): void {
     {
       containerName: z.string().describe("Name of the container holding the blob (e.g. 'my-data-2024')"),
       blobName: z.string().describe("Full blob name including virtual directory path (e.g. 'reports/2024/q1-summary.pdf')"),
+      format: formatSchema,
     },
-    async ({ containerName, blobName }) => {
+    async ({ containerName, blobName, format }) => {
       const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const blockBlobClient = containerClient.getBlockBlobClient(blobName);
       await blockBlobClient.delete({ deleteSnapshots: "include" });
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ success: true, deleted: blobName }),
-          },
-        ],
-      };
+      return formatResponse({ success: true, deleted: blobName }, format, "Blob Deleted");
     }
   );
 
@@ -358,24 +332,18 @@ export function registerBlobTools(server: McpServer): void {
       metadata: z
         .record(z.string(), z.string())
         .describe("Metadata key-value string pairs to set (e.g. {\"author\": \"Alice\", \"status\": \"reviewed\"}). Replaces ALL existing metadata."),
+      format: formatSchema,
     },
-    async ({ containerName, blobName, metadata }) => {
+    async ({ containerName, blobName, metadata, format }) => {
       const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
       const blobClient = containerClient.getBlobClient(blobName);
       await blobClient.setMetadata(metadata);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              blobName,
-              metadataKeys: Object.keys(metadata),
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        success: true,
+        blobName,
+        metadataKeys: Object.keys(metadata),
+      }, format, "Metadata Updated");
     }
   );
 
@@ -399,8 +367,9 @@ export function registerBlobTools(server: McpServer): void {
         .optional()
         .default("r")
         .describe("SAS permissions string — combine: r=read, w=write, d=delete, l=list (default: 'r')"),
+      format: formatSchema,
     },
-    async ({ containerName, blobName, expiryHours, permissions }) => {
+    async ({ containerName, blobName, expiryHours, permissions, format }) => {
       const sasToken = generateBlobSas(
         config.accountName,
         config.accountKey,
@@ -412,14 +381,7 @@ export function registerBlobTools(server: McpServer): void {
       const url = `https://${config.accountName}.blob.core.windows.net/${containerName}/${blobName}?${sasToken}`;
       const expiresOn = new Date();
       expiresOn.setHours(expiresOn.getHours() + expiryHours);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ url, sasToken, expiresOn: expiresOn.toISOString() }),
-          },
-        ],
-      };
+      return formatResponse({ url, sasToken, expiresOn: expiresOn.toISOString() }, format, "Blob SAS URL");
     }
   );
 
@@ -434,8 +396,9 @@ export function registerBlobTools(server: McpServer): void {
         .optional()
         .default("rl")
         .describe("SAS permissions string — combine: r=read, l=list, w=write, d=delete (default: 'rl')"),
+      format: formatSchema,
     },
-    async ({ containerName, expiryHours, permissions }) => {
+    async ({ containerName, expiryHours, permissions, format }) => {
       const expiresOn = new Date();
       expiresOn.setHours(expiresOn.getHours() + expiryHours);
 
@@ -456,19 +419,12 @@ export function registerBlobTools(server: McpServer): void {
 
       const connectionString = `DefaultEndpointsProtocol=https;BlobEndpoint=https://${config.accountName}.blob.core.windows.net;SharedAccessSignature=${sasToken}`;
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              sasToken,
-              connectionString,
-              containerName,
-              expiresOn: expiresOn.toISOString(),
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        sasToken,
+        connectionString,
+        containerName,
+        expiresOn: expiresOn.toISOString(),
+      }, format, "Container SAS Token");
     }
   );
 }

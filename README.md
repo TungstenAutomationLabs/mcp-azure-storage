@@ -72,6 +72,8 @@ mcp-azure-storage/
 │   │   ├── table-tools.ts     #  5 tools — table CRUD + entity operations
 │   │   ├── fileshare-tools.ts #  8 tools — share/directory/file operations
 │   │   └── utility-tools.ts   #  6 tools — base64, SAS refresh, MIME lookup
+│   └── utils/
+│       └── format.ts              # Response formatting (JSON/HTML/MD) utility
 │   └── resources/
 │       ├── blob-resources.ts      #  4 resources — containers, blobs, properties
 │       ├── fileshare-resources.ts #  4 resources — shares, files, properties
@@ -95,6 +97,8 @@ mcp-azure-storage/
 │   │   ├── queue-resources.test.ts     # 3 tests — list cap, properties
 │   │   ├── table-resources.test.ts     # 3 tests — list cap, entity lookup
 │   │   └── fileshare-resources.test.ts # 4 tests — list cap, size guard
+│   ├── utils/
+│   │   └── format.test.ts             # 20 tests — JSON/HTML/MD formatting
 │   └── integration/
 │       ├── blob-integration.test.ts    # Azurite blob CRUD smoke test
 │       ├── queue-integration.test.ts   # Azurite queue CRUD smoke test
@@ -118,6 +122,38 @@ mcp-azure-storage/
 ├── package.json               # Dependencies and scripts
 └── LICENSE                    # Project license
 ```
+
+---
+
+## Response Format Option
+
+All 35 tools accept an optional `format` parameter that controls how structured data is returned:
+
+| Value | Description |
+|-------|-------------|
+| `json` | **(default)** Standard JSON — best for programmatic consumption and MCP tool chaining. |
+| `html` | Minimal HTML fragment (`<table>`, `<dl>`, `<pre>`) — designed for embedding in Teams Adaptive Cards, web chat, or Claude artifacts. No `<html>`/`<body>` wrappers. Elements carry CSS classes (`mcp-table`, `mcp-detail`, `mcp-raw`) for easy inline styling. |
+| `md` | GitHub-Flavoured Markdown — GFM tables for arrays, bold key–value lists for objects. Ideal for chat UIs that render Markdown natively. |
+
+**Example — request blob list as Markdown:**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "blob-list",
+    "arguments": { "containerName": "my-data", "format": "md" }
+  },
+  "id": 3
+}
+```
+
+**HTML output classes** (for CSS targeting):
+- `.mcp-title` — `<h3>` section heading
+- `.mcp-table` — `<table>` for array-of-objects
+- `.mcp-detail` — `<dl>` for single-object key–value
+- `.mcp-nested` — `<pre>` for nested JSON inside a detail list
+- `.mcp-raw` — `<pre>` for primitives or non-object data
 
 ---
 
@@ -641,7 +677,7 @@ npm run test:watch
 npm run test:coverage
 ```
 
-**Test coverage:** Config, API key middleware, all 35 tools across 5 modules, all 12 resources across 4 modules.
+**Test coverage:** Config, API key middleware, all 35 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
 
 ### Integration Tests (Azurite)
 

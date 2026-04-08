@@ -22,6 +22,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { formatSchema, formatResponse } from "../utils/format.js";
 import {
   ShareServiceClient,
   StorageSharedKeyCredential,
@@ -51,8 +52,8 @@ export function registerFileShareTools(server: McpServer): void {
   server.tool(
     "fileshare-list-shares",
     "List all Azure file shares in the storage account. Use this to discover available shares before performing file operations. Returns an array of objects with 'name' and 'properties' (quota, last modified, etc.) for each share.",
-    {},
-    async () => {
+    { format: formatSchema },
+    async ({ format }) => {
       const client = shareServiceClient;
       const shares: { name: string; properties: Record<string, unknown> }[] = [];
       for await (const share of client.listShares()) {
@@ -61,9 +62,7 @@ export function registerFileShareTools(server: McpServer): void {
           properties: share.properties as unknown as Record<string, unknown>,
         });
       }
-      return {
-        content: [{ type: "text", text: JSON.stringify(shares, null, 2) }],
-      };
+      return formatResponse(shares, format, "File Shares");
     }
   );
 
@@ -72,24 +71,17 @@ export function registerFileShareTools(server: McpServer): void {
     "Create a new Azure file share if it doesn't already exist. Idempotent — safe to call even if the share already exists. Use this before uploading files to a new share.",
     {
       shareName: z.string().describe("File share name (lowercase letters, digits, and hyphens, 3-63 chars, e.g. 'project-documents')"),
+      format: formatSchema,
     },
-    async ({ shareName }) => {
+    async ({ shareName, format }) => {
       const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
       const exists = await shareClient.exists();
       if (!exists) {
         await shareClient.create();
-        return {
-          content: [
-            { type: "text", text: `Share "${shareName}" created successfully.` },
-          ],
-        };
+        return formatResponse({ success: true, shareName, status: "created" }, format, "Share Created");
       }
-      return {
-        content: [
-          { type: "text", text: `Share "${shareName}" already exists.` },
-        ],
-      };
+      return formatResponse({ success: true, shareName, status: "already exists" }, format, "Share Exists");
     }
   );
 
@@ -98,16 +90,13 @@ export function registerFileShareTools(server: McpServer): void {
     "Permanently delete a file share and ALL files and directories inside it. WARNING: This is irreversible — all data in the share will be lost.",
     {
       shareName: z.string().describe("Name of the file share to delete (e.g. 'project-documents')"),
+      format: formatSchema,
     },
-    async ({ shareName }) => {
+    async ({ shareName, format }) => {
       const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
       await shareClient.delete();
-      return {
-        content: [
-          { type: "text", text: `Share "${shareName}" deleted.` },
-        ],
-      };
+      return formatResponse({ success: true, deleted: shareName }, format, "Share Deleted");
     }
   );
 
@@ -123,8 +112,9 @@ export function registerFileShareTools(server: McpServer): void {
       directoryPath: z
         .string()
         .describe("Forward-slash-separated directory path to create, including any nested levels (e.g. 'reports/2024/q1')"),
+      format: formatSchema,
     },
-    async ({ shareName, directoryPath }) => {
+    async ({ shareName, directoryPath, format }) => {
       const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
 
@@ -140,18 +130,11 @@ export function registerFileShareTools(server: McpServer): void {
         }
       }
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              directoryPath,
-              message: `Directory path "${directoryPath}" ensured.`,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        success: true,
+        directoryPath,
+        message: `Directory path "${directoryPath}" ensured.`,
+      }, format, "Directory Created");
     }
   );
 
@@ -161,21 +144,15 @@ export function registerFileShareTools(server: McpServer): void {
     {
       shareName: z.string().describe("Name of the file share (e.g. 'project-documents')"),
       directoryPath: z.string().describe("Path of the directory to delete (e.g. 'reports/2024/q1')"),
+      format: formatSchema,
     },
-    async ({ shareName, directoryPath }) => {
+    async ({ shareName, directoryPath, format }) => {
       const client = shareServiceClient;
       const dirClient = client
         .getShareClient(shareName)
         .getDirectoryClient(directoryPath);
       await dirClient.delete();
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Directory "${directoryPath}" deleted from share "${shareName}".`,
-          },
-        ],
-      };
+      return formatResponse({ success: true, deleted: directoryPath, shareName }, format, "Directory Deleted");
     }
   );
 
@@ -194,8 +171,9 @@ export function registerFileShareTools(server: McpServer): void {
         .describe("Target directory path (e.g. 'reports/2024'), or '.' for the share root"),
       fileName: z.string().describe("File name with extension (e.g. 'q1-summary.pdf')"),
       contentBase64: z.string().describe("File content encoded as a base64 string. Use 'util-to-base64' to convert text, or provide raw base64 for binary files."),
+      format: formatSchema,
     },
-    async ({ shareName, directoryPath, fileName, contentBase64 }) => {
+    async ({ shareName, directoryPath, fileName, contentBase64, format }) => {
       const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
 
@@ -228,20 +206,13 @@ export function registerFileShareTools(server: McpServer): void {
       await fileClient.create(buffer.length);
       await fileClient.uploadRange(buffer, 0, buffer.length);
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              shareName,
-              directoryPath,
-              fileName,
-              size: buffer.length,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        success: true,
+        shareName,
+        directoryPath,
+        fileName,
+        size: buffer.length,
+      }, format, "File Uploaded");
     }
   );
 
@@ -254,8 +225,9 @@ export function registerFileShareTools(server: McpServer): void {
         .string()
         .describe("Directory containing the file (e.g. 'reports/2024'), or '.' for the share root"),
       fileName: z.string().describe("Name of the file to read (e.g. 'q1-summary.pdf')"),
+      format: formatSchema,
     },
-    async ({ shareName, directoryPath, fileName }) => {
+    async ({ shareName, directoryPath, fileName, format }) => {
       const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
 
@@ -270,21 +242,14 @@ export function registerFileShareTools(server: McpServer): void {
         downloadResponse.readableStreamBody!
       );
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              shareName,
-              directoryPath,
-              fileName,
-              size: buffer.length,
-              contentType: downloadResponse.contentType,
-              contentBase64: buffer.toString("base64"),
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        shareName,
+        directoryPath,
+        fileName,
+        size: buffer.length,
+        contentType: downloadResponse.contentType,
+        contentBase64: buffer.toString("base64"),
+      }, format, "File Content");
     }
   );
 
@@ -297,8 +262,9 @@ export function registerFileShareTools(server: McpServer): void {
         .string()
         .describe("Directory containing the file (e.g. 'reports/2024'), or '.' for the share root"),
       fileName: z.string().describe("Name of the file to delete (e.g. 'q1-summary.pdf')"),
+      format: formatSchema,
     },
-    async ({ shareName, directoryPath, fileName }) => {
+    async ({ shareName, directoryPath, fileName, format }) => {
       const client = shareServiceClient;
       const shareClient = client.getShareClient(shareName);
 
@@ -310,17 +276,10 @@ export function registerFileShareTools(server: McpServer): void {
       const fileClient = dirClient.getFileClient(fileName);
       await fileClient.delete();
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              deleted: `${directoryPath}/${fileName}`,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        success: true,
+        deleted: `${directoryPath}/${fileName}`,
+      }, format, "File Deleted");
     }
   );
 

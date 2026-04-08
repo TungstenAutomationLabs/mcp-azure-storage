@@ -119,8 +119,10 @@ describe("fileshare-tools", () => {
         toolCallRequest("fileshare-create-share", { shareName: "new-share" })
       ).expect(200);
 
-      const text = extractToolText(res);
-      expect(text).toContain("created successfully");
+      const data = extractToolJson(res);
+      expect(data.success).toBe(true);
+      expect(data.shareName).toBe("new-share");
+      expect(data.status).toBe("created");
       expect(mockShareCreate).toHaveBeenCalled();
     });
 
@@ -133,8 +135,8 @@ describe("fileshare-tools", () => {
         toolCallRequest("fileshare-create-share", { shareName: "existing-share" })
       ).expect(200);
 
-      const text = extractToolText(res);
-      expect(text).toContain("already exists");
+      const data = extractToolJson(res);
+      expect(data.status).toBe("already exists");
     });
   });
 

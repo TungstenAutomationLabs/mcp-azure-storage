@@ -14,6 +14,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { formatSchema, formatResponse } from "../utils/format.js";
 import {
   StorageSharedKeyCredential,
   generateBlobSASQueryParameters,
@@ -46,23 +47,17 @@ export function registerUtilityTools(server: McpServer): void {
         .optional()
         .default("utf-8")
         .describe("Character encoding of the source text (default: 'utf-8')"),
+      format: formatSchema,
     },
-    async ({ text, encoding }) => {
+    async ({ text, encoding, format }) => {
       const base64 = Buffer.from(text, encoding as BufferEncoding).toString(
         "base64"
       );
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              base64,
-              originalLength: text.length,
-              base64Length: base64.length,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        base64,
+        originalLength: text.length,
+        base64Length: base64.length,
+      }, format, "Base64 Encoded");
     }
   );
 
@@ -76,23 +71,17 @@ export function registerUtilityTools(server: McpServer): void {
         .optional()
         .default("utf-8")
         .describe("Target character encoding for the decoded text (default: 'utf-8')"),
+      format: formatSchema,
     },
-    async ({ base64, encoding }) => {
-      const text = Buffer.from(base64, "base64").toString(
+    async ({ base64, encoding, format }) => {
+      const decoded = Buffer.from(base64, "base64").toString(
         encoding as BufferEncoding
       );
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              text,
-              base64Length: base64.length,
-              decodedLength: text.length,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        text: decoded,
+        base64Length: base64.length,
+        decodedLength: decoded.length,
+      }, format, "Base64 Decoded");
     }
   );
 
@@ -116,8 +105,9 @@ export function registerUtilityTools(server: McpServer): void {
         .optional()
         .default("r")
         .describe("SAS permissions string — combine: r=read, w=write, d=delete, l=list (default: 'r')"),
+      format: formatSchema,
     },
-    async ({ containerName, blobName, expiryHours, permissions }) => {
+    async ({ containerName, blobName, expiryHours, permissions, format }) => {
       const credential = new StorageSharedKeyCredential(
         config.accountName,
         config.accountKey
@@ -139,19 +129,12 @@ export function registerUtilityTools(server: McpServer): void {
 
       const url = `https://${config.accountName}.blob.core.windows.net/${containerName}/${blobName}?${sasToken}`;
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              url,
-              sasToken,
-              expiresOn: expiresOn.toISOString(),
-              permissions,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        url,
+        sasToken,
+        expiresOn: expiresOn.toISOString(),
+        permissions,
+      }, format, "Blob SAS Refreshed");
     }
   );
 
@@ -170,8 +153,9 @@ export function registerUtilityTools(server: McpServer): void {
         .optional()
         .default("rl")
         .describe("SAS permissions string — combine: r=read, l=list, w=write, d=delete (default: 'rl')"),
+      format: formatSchema,
     },
-    async ({ containerName, expiryHours, permissions }) => {
+    async ({ containerName, expiryHours, permissions, format }) => {
       const credential = new StorageSharedKeyCredential(
         config.accountName,
         config.accountKey
@@ -192,20 +176,13 @@ export function registerUtilityTools(server: McpServer): void {
 
       const connectionString = `DefaultEndpointsProtocol=https;BlobEndpoint=https://${config.accountName}.blob.core.windows.net;SharedAccessSignature=${sasToken}`;
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              containerName,
-              sasToken,
-              connectionString,
-              expiresOn: expiresOn.toISOString(),
-              permissions,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        containerName,
+        sasToken,
+        connectionString,
+        expiresOn: expiresOn.toISOString(),
+        permissions,
+      }, format, "Container SAS Refreshed");
     }
   );
 
@@ -218,17 +195,11 @@ export function registerUtilityTools(server: McpServer): void {
       fileName: z
         .string()
         .describe("File name (e.g. 'report.pdf') or bare extension (e.g. 'pdf') to look up"),
+      format: formatSchema,
     },
-    async ({ fileName }) => {
+    async ({ fileName, format }) => {
       const contentType = determineContentType(fileName);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ fileName, contentType }),
-          },
-        ],
-      };
+      return formatResponse({ fileName, contentType }, format, "Content Type");
     }
   );
 
@@ -254,17 +225,11 @@ export function registerUtilityTools(server: McpServer): void {
         .optional()
         .default(63)
         .describe("Maximum length of the resulting name (3-63, default: 63)"),
+      format: formatSchema,
     },
-    async ({ input, prefix, maxLength }) => {
+    async ({ input, prefix, maxLength, format }) => {
       const name = toContainerName(input, prefix, maxLength);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ input, containerName: name }),
-          },
-        ],
-      };
+      return formatResponse({ input, containerName: name }, format, "Container Name");
     }
   );
 }

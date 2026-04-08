@@ -20,6 +20,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { formatSchema, formatResponse } from "../utils/format.js";
 import {
   TableServiceClient,
   TableClient,
@@ -75,8 +76,8 @@ export function registerTableTools(server: McpServer): void {
   server.tool(
     "table-create",
     "Create a new table if it doesn't already exist. Idempotent — returns a message indicating whether the table was created or already existed. Use this before upserting entities to a new table.",
-    { tableName: z.string().describe("Table name to create (letters and digits only, 3-63 chars, must start with a letter, e.g. 'OrderHistory')") },
-    async ({ tableName }) => {
+    { tableName: z.string().describe("Table name to create (letters and digits only, 3-63 chars, must start with a letter, e.g. 'OrderHistory')"), format: formatSchema },
+    async ({ tableName, format }) => {
       const client = tableServiceClient;
       let status = "";
       await client.createTable(tableName, {
@@ -87,22 +88,18 @@ export function registerTableTools(server: McpServer): void {
               : `Created table "${tableName}".`;
         },
       });
-      return { content: [{ type: "text", text: status }] };
+      return formatResponse({ tableName, status }, format, "Table Create");
     }
   );
 
   server.tool(
     "table-delete",
     "Permanently delete a table and ALL entities inside it. WARNING: This is irreversible — all rows will be lost. Use 'table-entity-query' to inspect contents before deleting.",
-    { tableName: z.string().describe("Name of the table to delete (e.g. 'OrderHistory')") },
-    async ({ tableName }) => {
+    { tableName: z.string().describe("Name of the table to delete (e.g. 'OrderHistory')"), format: formatSchema },
+    async ({ tableName, format }) => {
       const client = tableServiceClient;
       await client.deleteTable(tableName);
-      return {
-        content: [
-          { type: "text", text: `Deleted table "${tableName}".` },
-        ],
-      };
+      return formatResponse({ success: true, deleted: tableName }, format, "Table Deleted");
     }
   );
 
@@ -126,23 +123,17 @@ export function registerTableTools(server: McpServer): void {
           'Flat JSON object of property name→value pairs (e.g. {"email": "a@b.com", "score": 95, "verified": true}). ' +
           "Do NOT include partitionKey or rowKey here — they are separate parameters."
         ),
+      format: formatSchema,
     },
-    async ({ tableName, partitionKey, rowKey, entity }) => {
+    async ({ tableName, partitionKey, rowKey, entity, format }) => {
       const client = getTableClient(tableName);
       const fullEntity = { partitionKey, rowKey, ...entity };
       await client.upsertEntity(fullEntity, "Merge");
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              partitionKey,
-              rowKey,
-            }),
-          },
-        ],
-      };
+      return formatResponse({
+        success: true,
+        partitionKey,
+        rowKey,
+      }, format, "Entity Upserted");
     }
   );
 
@@ -160,8 +151,9 @@ export function registerTableTools(server: McpServer): void {
         .optional()
         .default(100)
         .describe("Maximum number of entities to return (default: 100). Use smaller values for faster responses."),
+      format: formatSchema,
     },
-    async ({ tableName, filter, top }) => {
+    async ({ tableName, filter, top, format }) => {
       const client = getTableClient(tableName);
       const entities: Record<string, unknown>[] = [];
       const queryOptions: { queryOptions?: { filter?: string } } = {};
@@ -175,14 +167,7 @@ export function registerTableTools(server: McpServer): void {
         entities.push(entity as Record<string, unknown>);
         count++;
       }
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ count: entities.length, entities }, null, 2),
-          },
-        ],
-      };
+      return formatResponse({ count: entities.length, entities }, format, "Query Results");
     }
   );
 
@@ -193,18 +178,12 @@ export function registerTableTools(server: McpServer): void {
       tableName: z.string().describe("Name of the table (e.g. 'OrderHistory')"),
       partitionKey: z.string().describe("Partition key of the entity to delete (e.g. 'sales-region-west')"),
       rowKey: z.string().describe("Row key of the entity to delete (e.g. 'order-20240315-001')"),
+      format: formatSchema,
     },
-    async ({ tableName, partitionKey, rowKey }) => {
+    async ({ tableName, partitionKey, rowKey, format }) => {
       const client = getTableClient(tableName);
       await client.deleteEntity(partitionKey, rowKey);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ success: true, deleted: { partitionKey, rowKey } }),
-          },
-        ],
-      };
+      return formatResponse({ success: true, deleted: { partitionKey, rowKey } }, format, "Entity Deleted");
     }
   );
 }
