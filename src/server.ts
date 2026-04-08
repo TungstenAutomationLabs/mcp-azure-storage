@@ -23,6 +23,7 @@
 
 import "dotenv/config"; // Load .env file into process.env (local dev only; ignored in production)
 import express, { Request, Response } from "express";
+import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -49,6 +50,25 @@ const app = express();
 //  2. req.ip / req.protocol reflect the original client connection
 // Safe because Container Apps always terminates TLS and sets forwarded headers.
 app.set("trust proxy", true);
+
+// CORS — required for browser-based MCP clients (MCP Inspector, web chat, etc.)
+// Allows any origin with the headers used by MCP Streamable HTTP transport.
+app.use(
+  cors({
+    origin: true, // reflect request origin (allow any)
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Accept",
+      "Authorization",
+      "X-API-Key",
+      "Mcp-Session-Id",
+    ],
+    exposedHeaders: ["Mcp-Session-Id"],
+    credentials: true,
+    maxAge: 86400, // cache preflight for 24h
+  })
+);
 
 // Security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
 app.use(helmet());
