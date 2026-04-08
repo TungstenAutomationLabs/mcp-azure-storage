@@ -636,7 +636,7 @@ azd down --purge
 
 The deployment includes three mechanisms to ensure reliable connections:
 
-1. **Sticky sessions** — The Bicep ingress configures `stickySessions.affinity: 'sticky'` so all requests from the same client are routed to the same replica. Without this, stateful MCP sessions (stored in-memory) would break when the load balancer routes a request to a different replica.
+1. **Sticky sessions** — The Bicep ingress configures `stickySessions.affinity: 'sticky'` with `activeRevisionsMode: 'Single'` (required by Azure for sticky session support) so all requests from the same client are routed to the same replica. Without this, stateful MCP sessions (stored in-memory) would break when the load balancer routes a request to a different replica.
 
 2. **SSE keepalive heartbeats** — Azure Container Apps has a ~240 second idle timeout on ingress connections. SSE streams (used by stateful MCP sessions for server-initiated notifications) that go idle would be silently killed by the reverse proxy. The server sends periodic SSE comments (`: keepalive`) every 30 seconds to keep the connection alive. Configure via `SSE_KEEPALIVE_INTERVAL_MS`.
 

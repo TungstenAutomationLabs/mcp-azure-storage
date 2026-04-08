@@ -257,6 +257,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   properties: {
     managedEnvironmentId: containerAppEnv.id
     configuration: {
+      // ── Revision Mode ──
+      // Sticky sessions require Single revision mode (explicitly set here).
+      // In Single mode, only one active revision receives traffic at a time,
+      // and the ingress can pin clients to specific replicas via session
+      // affinity cookies.
+      activeRevisionsMode: 'Single'
       // ── Ingress ──
       // External ingress exposes the app on a public *.azurecontainerapps.io URL
       // with automatic HTTPS and a managed TLS certificate.
