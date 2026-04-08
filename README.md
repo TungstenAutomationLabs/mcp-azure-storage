@@ -18,7 +18,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
 - **SAS token generation** — blob and container-level shared access signatures
 - **Base64 content encoding** — upload/download binary files through JSON
 - **Docker** — multi-stage build, non-root container user
-- **Azure Container Apps** — Bicep IaC, user-assigned managed identity, auto-HTTPS, scale-to-zero
+- **Azure Container Apps** — Bicep IaC, user-assigned managed identity, auto-HTTPS, auto-scaling (1–5 replicas)
 
 ---
 
@@ -629,7 +629,7 @@ azd down --purge
 | `RATE_LIMIT_MAX_REQUESTS` | No | `300` | Max requests per window per IP |
 | `MAX_SESSIONS` | No | `100` | Maximum concurrent stateful MCP sessions (returns 503 when full) |
 
-> **Note:** The Azure deployment uses `minReplicas: 0` (scale-to-zero) for cost savings. The first request after an idle period may experience a cold start delay of 5–15 seconds while a new container instance spins up.
+> **Note:** The Azure deployment uses `minReplicas: 1` to keep at least one replica always running, ensuring consistent response times and no cold-start connection drops. The Container App auto-scales up to 5 replicas under load (HTTP concurrency threshold: 20 requests). If you want to reduce costs in a non-production environment, you can set `minReplicas: 0` in [`infra/main.bicep`](infra/main.bicep:328), but be aware that scale-to-zero causes 10–30 second cold starts that may time out HTTP clients like Postman.
 
 ---
 
