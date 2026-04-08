@@ -52,23 +52,28 @@ const app = express();
 app.set("trust proxy", true);
 
 // CORS — required for browser-based MCP clients (MCP Inspector, web chat, etc.)
-// Allows any origin with the headers used by MCP Streamable HTTP transport.
-app.use(
-  cors({
-    origin: true, // reflect request origin (allow any)
-    methods: ["GET", "POST", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Accept",
-      "Authorization",
-      "X-API-Key",
-      "Mcp-Session-Id",
-    ],
-    exposedHeaders: ["Mcp-Session-Id"],
-    credentials: true,
-    maxAge: 86400, // cache preflight for 24h
-  })
-);
+// Enabled by default (dev-friendly). Set CORS_ENABLED=false in production if the
+// server is only consumed by non-browser clients behind a reverse proxy.
+const CORS_ENABLED = (process.env.CORS_ENABLED ?? "true").toLowerCase() !== "false";
+
+if (CORS_ENABLED) {
+  app.use(
+    cors({
+      origin: true, // reflect request origin (allow any)
+      methods: ["GET", "POST", "DELETE", "OPTIONS"],
+      allowedHeaders: [
+        "Content-Type",
+        "Accept",
+        "Authorization",
+        "X-API-Key",
+        "Mcp-Session-Id",
+      ],
+      exposedHeaders: ["Mcp-Session-Id"],
+      credentials: true,
+      maxAge: 86400, // cache preflight for 24h
+    })
+  );
+}
 
 // Security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
 app.use(helmet());
@@ -371,6 +376,7 @@ const httpServer = app.listen(PORT, () => {
   console.log(
     `   API key auth : ${process.env.MCP_API_KEY ? "✅ ENABLED" : "⚠️  DISABLED (set MCP_API_KEY)"}`
   );
+  console.log(`   CORS         : ${CORS_ENABLED ? "✅ ENABLED" : "❌ DISABLED"}`);
   console.log(`   Rate limit   : ${RATE_LIMIT_MAX} req / ${RATE_LIMIT_WINDOW_MS / 60000} min per IP`);
   console.log(`   Session TTL  : ${SESSION_TTL_MS / 60000} minutes`);
   console.log(`   Max sessions : ${MAX_SESSIONS}`);

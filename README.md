@@ -311,6 +311,7 @@ You should see:
    Health check : http://localhost:3000/health
    Modes        : Stateful (session) + Stateless (one-shot)
    API key auth : ✅ ENABLED
+   CORS         : ✅ ENABLED
    Rate limit   : 300 req / 15 min per IP
    Session TTL  : 30 minutes
    JSON limit   : 50mb
@@ -621,6 +622,7 @@ azd down --purge
 | `MCP_API_KEY` | **Yes** | — | API key for client authentication |
 | `AZURE_STORAGE_ACCOUNT_NAME` | **Yes** | — | Azure Storage account name |
 | `AZURE_STORAGE_ACCOUNT_KEY` | **Yes** | — | Azure Storage account key |
+| `CORS_ENABLED` | No | `true` | Enable CORS headers for browser-based clients (MCP Inspector, web chat). Set `false` in production if only non-browser clients connect. |
 | `SAS_EXPIRY_HOURS` | No | `24` | Default SAS token expiry (hours) |
 | `SAS_DEFAULT_PERMISSIONS` | No | `rl` | Default SAS permissions |
 | `RATE_LIMIT_WINDOW_MINUTES` | No | `15` | Rate limit window (minutes) |
