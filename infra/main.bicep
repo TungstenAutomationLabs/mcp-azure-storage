@@ -60,6 +60,11 @@ param existingStorageAccountKey string = ''
 // Computed flag: true when the user is bringing their own storage account.
 var useExistingStorage = !empty(existingStorageAccountName) && !empty(existingStorageAccountKey)
 
+// Normalise the environment name to lowercase so every derived resource name
+// is valid. Azure Container Apps, Storage Accounts, and ACR all reject names
+// that contain uppercase characters.
+var envName = toLower(environmentName)
+
 // ── Placeholder Image ─────────────────────────────────────────
 // During `azd provision`, the Container App always starts with this public
 // placeholder image. The real application image is pushed to ACR and applied
@@ -75,7 +80,7 @@ var placeholderImage = 'mcr.microsoft.com/k8se/quickstart:latest'
 // logs. PerGB2018 pricing tier is the most common pay-as-you-go option.
 // Logs are retained for 30 days to balance cost and debuggability.
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
-  name: '${environmentName}-logs'
+  name: '${envName}-logs'
   location: location
   properties: {
     sku: { name: 'PerGB2018' }
@@ -88,7 +93,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 // throughput dev/test scenarios. Admin user is disabled — image pulls use
 // the user-assigned managed identity via the AcrPull role assignment below.
 resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
-  name: '${replace(environmentName, '-', '')}acr'
+  name: '${replace(envName, '-', '')}acr'
   location: location
   sku: { name: 'Basic' }
   properties: {
@@ -107,7 +112,7 @@ resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' =
 //   2. Storage RBAC (Blob/Queue/Table Data Contributor roles) — only when
 //      provisioning a new storage account (not for BYOSA)
 resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: '${environmentName}-identity'
+  name: '${envName}-identity'
   location: location
 }
 
@@ -144,7 +149,7 @@ resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-
 // in the same environment share the same virtual network and Log Analytics
 // workspace.
 resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: '${environmentName}-env'
+  name: '${envName}-env'
   location: location
   properties: {
     appLogsConfiguration: {
@@ -171,7 +176,7 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
 
 // ── Storage Account (new, only when NOT using BYOSA) ─────────
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!useExistingStorage) {
-  name: '${replace(environmentName, '-', '')}stor'
+  name: '${replace(envName, '-', '')}stor'
   location: location
   sku: { name: 'Standard_LRS' }
   kind: 'StorageV2'
@@ -232,7 +237,7 @@ var resolvedStorageAccountKey = useExistingStorage ? existingStorageAccountKey :
 // completed BEFORE this resource is created (via dependsOn), eliminating
 // the circular dependency that previously caused UNAUTHORIZED errors.
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: toLower('${environmentName}-mcp')
+  name: '${envName}-mcp'
   location: location
   tags: {
     'azd-service-name': 'mcp-server'   // Required: maps this resource to the service in azure.yaml
