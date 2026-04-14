@@ -1,15 +1,18 @@
 /**
- * Azure Blob Storage MCP tools — 10 tools.
+ * Azure Blob Storage MCP tools — 11 tools.
  *
  * Provides container management (create, delete, exists), blob CRUD
- * (list, create/upload, read/download, delete, set-metadata), and SAS token
- * generation (blob-level and container-level).
+ * (list, create/upload, read/download, delete, set-metadata), URL-based
+ * upload (server-side fetch), and SAS token generation (blob-level and
+ * container-level).
  *
  * Note: Container listing is provided by the `azure-blob:///containers`
  * MCP resource (see resources/blob-resources.ts).
  *
- * All blob content is transferred as base64 strings within JSON.
- * Use `util-to-base64` / `util-from-base64` for text encoding/decoding.
+ * Content transfer modes:
+ *  - `blob-create` — base64-encoded content in JSON (small files / text)
+ *  - `blob-upload-from-url` — server fetches from a URL (large/binary files)
+ *  - `POST /upload` — multipart form-data REST endpoint (see server.ts)
  *
  * @module tools/blob-tools
  */
@@ -28,7 +31,7 @@ import {
 import { getStorageConfig } from "../config.js";
 
 /**
- * Register all 10 Blob Storage tools on the given MCP server.
+ * Register all 11 Blob Storage tools on the given MCP server.
  *
  * Creates a singleton BlobServiceClient that reuses the internal HTTP
  * connection pool across all tool invocations for better performance.
@@ -427,11 +430,142 @@ export function registerBlobTools(server: McpServer): void {
       }, format, "Container SAS Token");
     }
   );
+
+  // ──────────────────────────────────────────────────────────────
+  // URL-BASED UPLOAD (server-side fetch — no base64 through LLM context)
+  // ──────────────────────────────────────────────────────────────
+
+  server.tool(
+    "blob-upload-from-url",
+    "Upload a file to blob storage by providing a URL. The MCP server fetches the file server-side, so no base64 encoding is needed — ideal for large or binary files (PDFs, images, etc.) that exceed LLM context limits. The URL must be publicly accessible or pre-authenticated (e.g. a SAS URL). Returns JSON with 'success', 'blobName', 'contentType', 'size' (bytes), and 'metadataSet'.",
+    {
+      containerName: z.string().describe("Name of the target container (e.g. 'my-data-2024')"),
+      blobName: z
+        .string()
+        .describe("Full blob name including any virtual directory path (e.g. 'reports/2024/q1-summary.pdf')"),
+      sourceUrl: z
+        .string()
+        .url()
+        .describe("URL to fetch the file from. Must be publicly accessible or include authentication (e.g. a SAS URL). Supports http:// and https://."),
+      metadata: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe("Optional custom metadata as key-value string pairs (e.g. {\"author\": \"Alice\", \"source\": \"external\"})"),
+      format: formatSchema,
+    },
+    async ({ containerName, blobName, sourceUrl, metadata, format }) => {
+      // ── SSRF protection ──
+      // Validate the URL before fetching to prevent Server-Side Request Forgery.
+      // An attacker with a valid API key could otherwise probe internal services:
+      //   • Azure IMDS (169.254.169.254) — steal managed identity tokens
+      //   • Internal VNet endpoints, Kubernetes API, etc.
+      assertSafeUrl(sourceUrl);
+
+      // Fetch the file from the source URL
+      const response = await fetch(sourceUrl, { redirect: "error" });
+      if (!response.ok) {
+        throw new Error(
+          `Failed to fetch from URL: ${response.status} ${response.statusText}`
+        );
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      // Use content-type from response if available, otherwise detect from blob name
+      const contentType =
+        response.headers.get("content-type")?.split(";")[0]?.trim() ||
+        determineContentType(blobName);
+
+      const containerClient = blobServiceClient.getContainerClient(containerName);
+      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+
+      await blockBlobClient.uploadData(buffer, {
+        blobHTTPHeaders: { blobContentType: contentType },
+      });
+
+      if (metadata && Object.keys(metadata).length > 0) {
+        await blockBlobClient.setMetadata(metadata);
+      }
+
+      return formatResponse(
+        {
+          success: true,
+          blobName,
+          contentType,
+          size: buffer.length,
+          metadataSet: metadata ? Object.keys(metadata).length : 0,
+        },
+        format,
+        "Blob Uploaded from URL"
+      );
+    }
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS (module-private)
 // ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * SSRF protection — validate a URL before the server fetches it.
+ *
+ * Blocks requests to:
+ *  - Azure Instance Metadata Service (IMDS): 169.254.169.254
+ *  - Private/internal IP ranges (10.x, 172.16-31.x, 192.168.x)
+ *  - Loopback (127.x, localhost, [::1])
+ *  - Link-local (169.254.x)
+ *  - Non-HTTP(S) schemes (file://, ftp://, etc.)
+ *
+ * @throws {Error} If the URL targets a blocked host or scheme.
+ */
+function assertSafeUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Invalid URL format.");
+  }
+
+  // Only allow http/https schemes
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      `Blocked URL scheme "${parsed.protocol}" — only http: and https: are allowed.`
+    );
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+
+  // Block localhost / loopback
+  if (
+    hostname === "localhost" ||
+    hostname === "[::1]" ||
+    hostname.startsWith("127.")
+  ) {
+    throw new Error("Blocked URL — loopback addresses are not allowed.");
+  }
+
+  // Block link-local (Azure IMDS lives at 169.254.169.254)
+  if (hostname.startsWith("169.254.")) {
+    throw new Error(
+      "Blocked URL — link-local addresses (169.254.x.x) are not allowed."
+    );
+  }
+
+  // Block private IP ranges (RFC 1918)
+  if (
+    hostname.startsWith("10.") ||
+    hostname.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(hostname)
+  ) {
+    throw new Error("Blocked URL — private network addresses are not allowed.");
+  }
+
+  // Block 0.0.0.0 (all interfaces)
+  if (hostname === "0.0.0.0") {
+    throw new Error("Blocked URL — 0.0.0.0 is not allowed.");
+  }
+}
 
 /**
  * Generate a SAS (Shared Access Signature) query string for a specific blob.

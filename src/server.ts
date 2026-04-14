@@ -26,6 +26,7 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
+import multer from "multer";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "crypto";
@@ -102,6 +103,7 @@ const limiter = rateLimit({
   },
 });
 app.use("/mcp", limiter);
+app.use("/upload", limiter);
 
 // Accept large JSON payloads (base64-encoded files can be tens of MB)
 app.use(express.json({ limit: "50mb" }));
@@ -109,7 +111,7 @@ app.use(express.json({ limit: "50mb" }));
 // ── MCP server factory ───────────────────────────────────────────────────────
 
 /**
- * Create a fresh MCP server instance with all 35 tools and 12 resources.
+ * Create a fresh MCP server instance with all 36 tools and 12 resources.
  *
  * A new instance is created for each stateful session and each stateless
  * request. Tool and resource registrations read the shared singleton
@@ -411,11 +413,116 @@ app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "healthy" });
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+// POST /upload — Direct file upload via multipart form-data
+//
+// This REST endpoint bypasses the MCP JSON-RPC transport entirely, allowing
+// any HTTP client (curl, Python, browser, CI/CD) to upload files of any size
+// directly to Azure Blob Storage without base64 encoding.
+//
+// This solves the "large file" problem: MCP is JSON-RPC, so binary content
+// must be base64-encoded in JSON — impractical for multi-MB files when the
+// LLM context window can't hold the encoded string. This endpoint accepts
+// standard multipart/form-data uploads instead.
+//
+// Usage:
+//   curl -X POST https://<host>/upload \
+//     -H "X-API-Key: <key>" \
+//     -F "file=@./report.pdf" \
+//     -F "containerName=my-container" \
+//     -F "blobName=reports/2024/report.pdf"
+//
+// Security: Protected by the same API key middleware as /mcp.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Multer stores uploaded files in memory (Buffer). The 100MB limit matches
+// Azure Container Apps' default request body limit. For very large files,
+// consider using blob-get-container-sas to generate a write SAS URL and
+// uploading directly to Azure Storage from the client.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+});
+
+app.post("/upload", apiKeyAuth, upload.single("file"), async (req: Request, res: Response) => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: "No file provided. Send a multipart form with a 'file' field." });
+      return;
+    }
+
+    const containerName = req.body.containerName;
+    if (!containerName) {
+      res.status(400).json({ error: "Missing required field: containerName" });
+      return;
+    }
+
+    // Use provided blobName, or fall back to the original filename
+    const blobName = req.body.blobName || file.originalname;
+    if (!blobName) {
+      res.status(400).json({ error: "Missing required field: blobName (or upload a file with a filename)" });
+      return;
+    }
+
+    // Parse optional metadata from JSON string
+    let metadata: Record<string, string> | undefined;
+    if (req.body.metadata) {
+      try {
+        metadata = JSON.parse(req.body.metadata);
+      } catch {
+        res.status(400).json({ error: "Invalid metadata JSON. Provide a JSON object string, e.g. '{\"author\":\"Alice\"}'" });
+        return;
+      }
+    }
+
+    // Lazy-load storage config and create client (same pattern as blob-tools.ts)
+    const { getStorageConfig } = await import("./config.js");
+    const config = getStorageConfig();
+    const { BlobServiceClient, StorageSharedKeyCredential } = await import("@azure/storage-blob");
+
+    const credential = new StorageSharedKeyCredential(config.accountName, config.accountKey);
+    const blobServiceUrl = config.blobServiceUrl || `https://${config.accountName}.blob.core.windows.net`;
+    const blobServiceClient = new BlobServiceClient(blobServiceUrl, credential);
+
+    const containerClient = blobServiceClient.getContainerClient(containerName);
+    const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+
+    // Use the MIME type from multer (which reads the Content-Type header from the
+    // multipart part), or fall back to octet-stream
+    const contentType = file.mimetype || "application/octet-stream";
+
+    await blockBlobClient.uploadData(file.buffer, {
+      blobHTTPHeaders: { blobContentType: contentType },
+    });
+
+    if (metadata && Object.keys(metadata).length > 0) {
+      await blockBlobClient.setMetadata(metadata);
+    }
+
+    res.status(200).json({
+      success: true,
+      blobName,
+      containerName,
+      contentType,
+      size: file.buffer.length,
+      metadataSet: metadata ? Object.keys(metadata).length : 0,
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Upload failed";
+    console.error("Upload error:", error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: message });
+    }
+  }
+});
+
 // ── Start HTTP server ────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const httpServer = app.listen(PORT, () => {
   console.log(`\n🚀 MCP Azure Storage Server v1.0.0`);
   console.log(`   MCP endpoint : http://localhost:${PORT}/mcp`);
+  console.log(`   Upload       : http://localhost:${PORT}/upload`);
   console.log(`   Health check : http://localhost:${PORT}/health`);
   console.log(`   Modes        : Stateful (session) + Stateless (one-shot)`);
   console.log(
@@ -426,7 +533,8 @@ const httpServer = app.listen(PORT, () => {
   console.log(`   Session TTL  : ${SESSION_TTL_MS / 60000} minutes`);
   console.log(`   Max sessions : ${MAX_SESSIONS}`);
   console.log(`   SSE keepalive: ${SSE_KEEPALIVE_INTERVAL_MS / 1000}s`);
-  console.log(`   JSON limit   : 50mb\n`);
+  console.log(`   JSON limit   : 50mb`);
+  console.log(`   Upload limit : 100mb\n`);
 });
 
 // ── Graceful shutdown ────────────────────────────────────────────────────────

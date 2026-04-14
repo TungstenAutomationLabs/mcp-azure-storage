@@ -73,18 +73,19 @@ describe("blob-tools", () => {
   });
 
   describe("tool registration", () => {
-    it("registers 10 blob tools", async () => {
+    it("registers 11 blob tools", async () => {
       const app = createBlobTestApp();
       const res = await mcpPost(app, toolListRequest()).expect(200);
 
       const tools = extractToolsList(res);
-      expect(tools.length).toBe(10);
+      expect(tools.length).toBe(11);
 
       const names = tools.map((t: any) => t.name);
       expect(names).toContain("blob-container-create");
       expect(names).toContain("blob-read");
       expect(names).toContain("blob-create");
       expect(names).toContain("blob-get-sas-url");
+      expect(names).toContain("blob-upload-from-url");
     });
   });
 
@@ -256,6 +257,145 @@ describe("blob-tools", () => {
       expect(data.url).toContain("test/file.pdf");
       expect(data.sasToken).toBeDefined();
       expect(data.expiresOn).toBeDefined();
+    });
+  });
+
+  describe("blob-upload-from-url", () => {
+    it("fetches from URL and uploads to blob storage", async () => {
+      mockUploadData.mockResolvedValue({});
+
+      const fileContent = Buffer.from("PDF content here");
+      // Mock global fetch
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Map([["content-type", "application/pdf"]]),
+        arrayBuffer: () => Promise.resolve(fileContent.buffer.slice(
+          fileContent.byteOffset,
+          fileContent.byteOffset + fileContent.byteLength
+        )),
+      });
+      // Replace the headers Map with a get method
+      mockFetch.mockResolvedValue({
+        ok: true,
+        headers: { get: (name: string) => name === "content-type" ? "application/pdf" : null },
+        arrayBuffer: () => Promise.resolve(fileContent.buffer.slice(
+          fileContent.byteOffset,
+          fileContent.byteOffset + fileContent.byteLength
+        )),
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-upload-from-url", {
+          containerName: "test",
+          blobName: "report.pdf",
+          sourceUrl: "https://example.com/report.pdf",
+        })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data.success).toBe(true);
+      expect(data.blobName).toBe("report.pdf");
+      expect(data.contentType).toBe("application/pdf");
+      expect(data.size).toBe(fileContent.length);
+      expect(mockUploadData).toHaveBeenCalled();
+      expect(mockFetch).toHaveBeenCalledWith("https://example.com/report.pdf", { redirect: "error" });
+
+      vi.unstubAllGlobals();
+    });
+
+    it("sets metadata when provided", async () => {
+      mockUploadData.mockResolvedValue({});
+      mockSetMetadata.mockResolvedValue({});
+
+      const fileContent = Buffer.from("x");
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: () => "text/plain" },
+        arrayBuffer: () => Promise.resolve(fileContent.buffer.slice(
+          fileContent.byteOffset,
+          fileContent.byteOffset + fileContent.byteLength
+        )),
+      }));
+
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-upload-from-url", {
+          containerName: "test",
+          blobName: "doc.txt",
+          sourceUrl: "https://example.com/doc.txt",
+          metadata: { source: "external" },
+        })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data.metadataSet).toBe(1);
+      expect(mockSetMetadata).toHaveBeenCalledWith({ source: "external" });
+
+      vi.unstubAllGlobals();
+    });
+
+    it("blocks SSRF — rejects Azure IMDS URL (169.254.169.254)", async () => {
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-upload-from-url", {
+          containerName: "test",
+          blobName: "stolen-token.json",
+          sourceUrl: "http://169.254.169.254/metadata/identity/oauth2/token",
+        })
+      ).expect(200);
+
+      const text = extractToolText(res);
+      expect(text).toContain("link-local");
+    });
+
+    it("blocks SSRF — rejects localhost URL", async () => {
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-upload-from-url", {
+          containerName: "test",
+          blobName: "internal.json",
+          sourceUrl: "http://localhost:8080/admin",
+        })
+      ).expect(200);
+
+      const text = extractToolText(res);
+      expect(text).toContain("loopback");
+    });
+
+    it("blocks SSRF — rejects private network URL (10.x)", async () => {
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-upload-from-url", {
+          containerName: "test",
+          blobName: "internal.json",
+          sourceUrl: "http://10.0.0.1/secret",
+        })
+      ).expect(200);
+
+      const text = extractToolText(res);
+      expect(text).toContain("private network");
+    });
+
+    it("blocks SSRF — rejects file:// scheme", async () => {
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-upload-from-url", {
+          containerName: "test",
+          blobName: "etc-passwd.txt",
+          sourceUrl: "file:///etc/passwd",
+        })
+      ).expect(200);
+
+      const text = extractToolText(res);
+      expect(text).toContain("Blocked URL scheme");
     });
   });
 });

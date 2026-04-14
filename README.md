@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **35 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **36 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed identity, and Bicep infrastructure-as-code.
 
@@ -8,8 +8,10 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
 
 ## Features
 
-- **35 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **36 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
 - **12 MCP resources** — read-only, URI-addressable data for LLM context (listings, content reads, properties)
+- **Direct file upload** — `POST /upload` endpoint for multipart form-data (bypasses base64/JSON-RPC for large files)
+- **URL-based upload** — `blob-upload-from-url` tool fetches files server-side (no base64 through LLM context)
 - **Dual-mode transport** — stateful sessions for MCP clients + stateless one-shot for HTTP testing
 - **API key authentication** with constant-time comparison (X-API-Key header or Bearer token)
 - **Rate limiting** — configurable per-IP request limits
@@ -67,7 +69,7 @@ mcp-azure-storage/
 │   ├── middleware/
 │   │   └── api-key.ts         # API key auth (X-API-Key / Bearer)
 │   ├── tools/
-│   │   ├── blob-tools.ts      # 10 tools — container + blob CRUD, SAS, metadata
+│   │   ├── blob-tools.ts      # 11 tools — container + blob CRUD, SAS, metadata, URL upload
 │   │   ├── queue-tools.ts     #  6 tools — queue CRUD + message operations
 │   │   ├── table-tools.ts     #  5 tools — table CRUD + entity operations
 │   │   ├── fileshare-tools.ts #  8 tools — share/directory/file operations
@@ -87,7 +89,7 @@ mcp-azure-storage/
 │   ├── middleware/
 │   │   └── api-key.test.ts    # API key auth tests (503/401/403/pass-through)
 │   ├── tools/
-│   │   ├── blob-tools.test.ts      #  9 tests — mock Azure Blob SDK
+│   │   ├── blob-tools.test.ts      # 15 tests — mock Azure Blob SDK + SSRF
 │   │   ├── queue-tools.test.ts     #  7 tests — mock Azure Queue SDK
 │   │   ├── table-tools.test.ts     #  7 tests — mock Azure Tables SDK
 │   │   ├── fileshare-tools.test.ts #  6 tests — mock Azure File Share SDK
@@ -128,7 +130,7 @@ mcp-azure-storage/
 
 ## Response Format Option
 
-All 35 tools accept an optional `format` parameter that controls how structured data is returned:
+All 36 tools accept an optional `format` parameter that controls how structured data is returned:
 
 | Value | Description |
 |-------|-------------|
@@ -160,7 +162,7 @@ All 35 tools accept an optional `format` parameter that controls how structured 
 
 ## Available Tools
 
-### Blob Storage (10 tools)
+### Blob Storage (11 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -168,7 +170,8 @@ All 35 tools accept an optional `format` parameter that controls how structured 
 | `blob-container-delete` | **Destructive** — permanently delete a container and ALL blobs inside it. Verify with `blob-container-exists` first. |
 | `blob-container-exists` | Check whether a container exists. Returns `{ exists: true/false }`. |
 | `blob-list` | List blobs in a container, optionally filtered by virtual directory prefix. Returns name, size, content type, dates, and optional metadata. |
-| `blob-create` | Upload or overwrite a blob (base64 content). MIME type is auto-detected from extension. Use `util-to-base64` to encode text first. |
+| `blob-create` | Upload or overwrite a blob (base64 content). MIME type is auto-detected from extension. Use `util-to-base64` to encode text first. Best for small/text files. |
+| `blob-upload-from-url` | Upload a file by URL — the server fetches it server-side. **Ideal for large/binary files** (PDFs, images) that exceed LLM context limits. No base64 encoding needed. |
 | `blob-read` | Download blob content as base64, or set `returnUrl=true` to get a time-limited SAS URL instead. Use `util-from-base64` to decode text. |
 | `blob-delete` | **Destructive** — permanently delete a blob and its snapshots. |
 | `blob-set-metadata` | Replace all custom metadata on a blob. Include existing keys you want to keep — this is a full replacement. |
@@ -255,6 +258,105 @@ Resources provide **read-only, URI-addressable** access to storage data. Unlike 
 |---|---|
 | `azure-table:///tables` | List all tables. Use before querying or upserting entities via tools. |
 | `azure-table:///tables/{tableName}/entities/{partitionKey}/{rowKey}` | Get a single entity by composite key. Faster than a query when you know the exact key. |
+
+---
+
+## Uploading Large / Binary Files
+
+MCP uses JSON-RPC, so all tool parameters are JSON strings. For small files, `blob-create` works well with base64 encoding. But for large or binary files (PDFs, images, videos), base64 encoding is impractical — especially when the LLM context window can't hold a multi-MB encoded string.
+
+Three approaches solve this:
+
+### Option 1 — `blob-upload-from-url` MCP tool (recommended for AI agents)
+
+Give the server a URL; it fetches and uploads server-side. No base64 needed — the LLM only passes a short URL string:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "blob-upload-from-url",
+    "arguments": {
+      "containerName": "documents",
+      "blobName": "reports/annual-report.pdf",
+      "sourceUrl": "https://example.com/files/annual-report.pdf"
+    }
+  },
+  "id": 1
+}
+```
+
+The URL must be publicly accessible or include authentication (e.g. a SAS URL from another storage account). The server detects the MIME type from the HTTP response headers.
+
+### Option 2 — `POST /upload` REST endpoint (recommended for scripts / CI / clients)
+
+Upload files directly via standard multipart form-data — the same format used by HTML file inputs and `curl`. No MCP or JSON-RPC involved:
+
+```bash
+# Upload a PDF
+curl -X POST https://<your-app>.azurecontainerapps.io/upload \
+  -H "X-API-Key: <your-api-key>" \
+  -F "file=@./annual-report.pdf" \
+  -F "containerName=documents" \
+  -F "blobName=reports/annual-report.pdf"
+
+# Upload with metadata
+curl -X POST https://<your-app>.azurecontainerapps.io/upload \
+  -H "X-API-Key: <your-api-key>" \
+  -F "file=@./photo.jpg" \
+  -F "containerName=images" \
+  -F "blobName=photos/vacation.jpg" \
+  -F 'metadata={"photographer":"Alice","location":"Paris"}'
+```
+
+**Python example:**
+```python
+import requests
+
+response = requests.post(
+    "https://<your-app>.azurecontainerapps.io/upload",
+    headers={"X-API-Key": "<your-api-key>"},
+    files={"file": open("report.pdf", "rb")},
+    data={
+        "containerName": "documents",
+        "blobName": "reports/report.pdf",
+    },
+)
+print(response.json())
+# → {"success": true, "blobName": "reports/report.pdf", "contentType": "application/pdf", "size": 2048576, ...}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `file` | **Yes** | The file to upload (multipart form field) |
+| `containerName` | **Yes** | Target blob container |
+| `blobName` | No | Blob name (defaults to the uploaded filename) |
+| `metadata` | No | JSON string of key-value metadata |
+
+**Limits:** 100 MB per upload. For larger files, use Option 3 below.
+
+### Option 3 — SAS URL direct upload (for very large files)
+
+Use `blob-get-container-sas` to generate a write-enabled SAS URL, then upload directly to Azure Storage from any HTTP client — bypassing the MCP server entirely:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "blob-get-container-sas",
+    "arguments": {
+      "containerName": "documents",
+      "permissions": "rwl",
+      "expiryHours": 1
+    }
+  },
+  "id": 1
+}
+```
+
+Then upload directly to Azure Blob Storage using the SAS token from the response — no size limits from the MCP server.
 
 ---
 
@@ -412,10 +514,11 @@ Set transport to **Streamable HTTP**, URL to `http://localhost:3000/mcp`, and ad
 
 ## Connecting to AI Assistants
 
-### RooCode / Claude Desktop
+### RooCode (VS Code)
 
-Add to your VS Code MCP settings (`.vscode/mcp.json` or global settings):
+RooCode supports Streamable HTTP transport natively. Add to your VS Code MCP settings (`.vscode/mcp.json` or global settings):
 
+**Local dev server:**
 ```json
 {
   "mcpServers": {
@@ -425,6 +528,96 @@ Add to your VS Code MCP settings (`.vscode/mcp.json` or global settings):
       "headers": {
         "X-API-Key": "<your-api-key>"
       }
+    }
+  }
+}
+```
+
+**Remote (Azure-deployed) server:**
+```json
+{
+  "mcpServers": {
+    "azure-storage": {
+      "url": "https://<your-app>.azurecontainerapps.io/mcp",
+      "transport": "streamable-http",
+      "headers": {
+        "X-API-Key": "<your-production-api-key>"
+      }
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Claude Desktop does not natively support remote HTTP MCP servers — it only connects to local stdio processes. To bridge the gap, use [`mcp-remote`](https://www.npmjs.com/package/mcp-remote), which acts as a local stdio-to-HTTP proxy.
+
+**Prerequisites:** [Node.js](https://nodejs.org/) 20+ must be installed.
+
+**Setup:**
+
+1. Open Claude Desktop → **Settings** → **Developer** → **Local MCP Servers** → **Edit Config**
+2. Add the following to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mcp-azure-storage": {
+      "command": "C:\\PROGRA~1\\nodejs\\npx.cmd",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://<your-app>.azurecontainerapps.io/mcp",
+        "--header",
+        "X-API-Key: <your-production-api-key>",
+        "--transport",
+        "http-first"
+      ]
+    }
+  }
+}
+```
+
+> **macOS / Linux** — replace `"command"` with `"npx"` (assuming Node.js is on your PATH):
+> ```json
+> {
+>   "mcpServers": {
+>     "mcp-azure-storage": {
+>       "command": "npx",
+>       "args": [
+>         "-y",
+>         "mcp-remote",
+>         "https://<your-app>.azurecontainerapps.io/mcp",
+>         "--header",
+>         "X-API-Key: <your-production-api-key>",
+>         "--transport",
+>         "http-first"
+>       ]
+>     }
+>   }
+> }
+> ```
+
+3. Restart Claude Desktop. The MCP server should appear in the tools list.
+
+**How it works:** `mcp-remote` runs as a local stdio process that Claude Desktop spawns. It forwards all MCP JSON-RPC messages over HTTP to your remote Azure endpoint, passing the `X-API-Key` header for authentication. The `--transport http-first` flag tells it to prefer Streamable HTTP transport (matching this server's transport).
+
+**For local development**, point at `http://localhost:3000/mcp` instead of the Azure URL:
+
+```json
+{
+  "mcpServers": {
+    "mcp-azure-storage": {
+      "command": "C:\\PROGRA~1\\nodejs\\npx.cmd",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://localhost:3000/mcp",
+        "--header",
+        "X-API-Key: <your-local-api-key>",
+        "--transport",
+        "http-first"
+      ]
     }
   }
 }
@@ -654,8 +847,10 @@ The deployment includes three mechanisms to ensure reliable connections:
 - **Fail-closed authentication** — all requests are rejected if `MCP_API_KEY` is not set
 - **Constant-time comparison** — API key validation uses `crypto.timingSafeEqual` to prevent timing attacks
 - **No query-param auth** — API keys are only accepted via headers (not URLs that leak to logs)
+- **SSRF protection** — `blob-upload-from-url` validates URLs before fetching: blocks loopback, link-local (Azure IMDS 169.254.169.254), private RFC 1918 ranges, non-HTTP schemes, and open redirects (`redirect: "error"`)
+- **Upload limits** — `POST /upload` capped at 100 MB via `multer`; rate-limited by the same per-IP limiter as `/mcp`
 - **Helmet** — sets security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
-- **Rate limiting** — per-IP request throttling to prevent abuse
+- **Rate limiting** — per-IP request throttling on both `/mcp` and `/upload` endpoints
 - **Session TTL** — idle sessions are automatically evicted after 30 minutes
 - **Non-root Docker** — container runs as unprivileged `appuser`
 - **User-assigned managed identity** — ACR pull + Storage RBAC with no circular dependency
@@ -686,7 +881,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 
 ## Testing
 
-### Unit Tests (86 tests, no Azure required)
+### Unit Tests (92 tests, no Azure required)
 
 Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
 
@@ -701,7 +896,7 @@ npm run test:watch
 npm run test:coverage
 ```
 
-**Test coverage:** Config, API key middleware, all 35 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
+**Test coverage:** Config, API key middleware, all 36 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
 
 ### Integration Tests (Azurite)
 
