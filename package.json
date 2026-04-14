@@ -13,7 +13,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:integration": "set TEST_INTEGRATION=1&& vitest run --config vitest.integration.config.ts"
+    "test:integration": "set TEST_INTEGRATION=1&& vitest run --config vitest.integration.config.ts",
+    "azd:dev": "azd up --environment mcp-storage-dev",
+    "azd:dev:provision": "azd provision --environment mcp-storage-dev",
+    "azd:dev:deploy": "azd deploy --environment mcp-storage-dev",
+    "azd:test": "azd up --environment mcp-storage-test",
+    "azd:test:provision": "azd provision --environment mcp-storage-test",
+    "azd:test:deploy": "azd deploy --environment mcp-storage-test"
   },
   "keywords": [
     "mcp",

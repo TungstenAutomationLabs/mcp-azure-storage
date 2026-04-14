@@ -115,6 +115,7 @@ mcp-azure-storage/
 ├── Dockerfile                 # Multi-stage build, non-root user
 ├── .dockerignore              # Excludes .env, docs, infra from image
 ├── azure.yaml                 # Azure Developer CLI project definition
+├── ENVIRONMENTS.md            # Multi-environment deployment guide (dev, test, prod)
 ├── .azure.env.example         # Template for azd deployment environment variables
 ├── .env.example               # Template for local environment variables
 ├── .gitignore                 # Ignores .env, dist, node_modules, docs
@@ -517,6 +518,8 @@ Leave them **unset** to have Bicep provision a new storage account automatically
 
 > **Tip:** View all current environment values with `azd env get-values`. To start fresh after a teardown, delete the `.azure/<env-name>/` directory or run `azd env new <new-name>`.
 
+> **Multiple environments (dev, test, prod):** `azd` supports named environments out of the box — each with its own subscription, region, and secrets. See the **[Multi-Environment Deployment Guide](ENVIRONMENTS.md)** for step-by-step instructions on creating, switching, and deploying to separate dev and test environments.
+
 ### 4. Deploy
 
 #### Option A — Single command
@@ -672,6 +675,12 @@ The deployment includes three mechanisms to ensure reliable connections:
 | `test:watch` | `npm run test:watch` | Run tests in watch mode |
 | `test:coverage` | `npm run test:coverage` | Run tests with v8 coverage report |
 | `test:integration` | `npm run test:integration` | Run Azurite integration tests |
+| `azd:dev` | `npm run azd:dev` | Provision + deploy to dev environment |
+| `azd:dev:provision` | `npm run azd:dev:provision` | Provision dev infrastructure only |
+| `azd:dev:deploy` | `npm run azd:dev:deploy` | Deploy app to dev only (skip provision) |
+| `azd:test` | `npm run azd:test` | Provision + deploy to test environment |
+| `azd:test:provision` | `npm run azd:test:provision` | Provision test infrastructure only |
+| `azd:test:deploy` | `npm run azd:test:deploy` | Deploy app to test only (skip provision) |
 
 ---
 
