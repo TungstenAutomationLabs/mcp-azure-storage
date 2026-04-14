@@ -37,12 +37,15 @@ describe("utility-tools", () => {
   });
 
   describe("tool registration", () => {
-    it("registers 6 utility tools", async () => {
+    it("registers 7 utility tools", async () => {
       const app = createUtilTestApp();
       const res = await mcpPost(app, toolListRequest()).expect(200);
 
       const tools = extractToolsList(res);
-      expect(tools).toHaveLength(6);
+      expect(tools).toHaveLength(7);
+
+      const names = tools.map((t: any) => t.name);
+      expect(names).toContain("util-get-upload-url");
     });
   });
 
@@ -156,6 +159,28 @@ describe("utility-tools", () => {
       expect(data.url).toContain("fakesig");
       expect(data.sasToken).toBeDefined();
       expect(data.expiresOn).toBeDefined();
+    });
+  });
+
+  describe("util-get-upload-url", () => {
+    it("returns upload endpoint URL and instructions", async () => {
+      const app = createUtilTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("util-get-upload-url", {})
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data.uploadUrl).toContain("/upload");
+      expect(data.method).toBe("POST");
+      expect(data.contentType).toBe("multipart/form-data");
+      expect(data.maxFileSize).toBe("100 MB");
+      expect(data.fields).toBeDefined();
+      expect(data.fields.file).toBeDefined();
+      expect(data.fields.containerName).toBeDefined();
+      expect(data.examples).toBeDefined();
+      expect(data.examples.curl).toContain("/upload");
+      expect(data.notes).toBeInstanceOf(Array);
     });
   });
 });

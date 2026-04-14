@@ -111,7 +111,7 @@ app.use(express.json({ limit: "50mb" }));
 // ── MCP server factory ───────────────────────────────────────────────────────
 
 /**
- * Create a fresh MCP server instance with all 36 tools and 12 resources.
+ * Create a fresh MCP server instance with all 37 tools and 12 resources.
  *
  * A new instance is created for each stateful session and each stateless
  * request. Tool and resource registrations read the shared singleton

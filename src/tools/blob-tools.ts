@@ -218,7 +218,7 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-create",
-    "Upload a new blob or overwrite an existing blob in a container. Content must be base64-encoded — use 'util-to-base64' to encode text content first. The MIME content type is auto-detected from the file extension. Returns JSON with 'success', 'blobName', 'contentType', 'size' (bytes), and 'metadataSet' (count of metadata keys).",
+    "Upload a new blob or overwrite an existing blob in a container. Content must be base64-encoded — use 'util-to-base64' to encode text content first. Best for SMALL TEXT files only. For large or binary files (PDFs, images, etc.), use 'blob-upload-from-url' instead (server-side fetch, no base64 needed), or call 'util-get-upload-url' to get the direct multipart upload endpoint. The MIME content type is auto-detected from the file extension. Returns JSON with 'success', 'blobName', 'contentType', 'size' (bytes), and 'metadataSet' (count of metadata keys).",
     {
       containerName: z.string().describe("Name of the target container (e.g. 'my-data-2024')"),
       blobName: z

@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **36 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **37 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed identity, and Bicep infrastructure-as-code.
 
@@ -8,7 +8,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
 
 ## Features
 
-- **36 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **37 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
 - **12 MCP resources** — read-only, URI-addressable data for LLM context (listings, content reads, properties)
 - **Direct file upload** — `POST /upload` endpoint for multipart form-data (bypasses base64/JSON-RPC for large files)
 - **URL-based upload** — `blob-upload-from-url` tool fetches files server-side (no base64 through LLM context)
@@ -73,7 +73,7 @@ mcp-azure-storage/
 │   │   ├── queue-tools.ts     #  6 tools — queue CRUD + message operations
 │   │   ├── table-tools.ts     #  5 tools — table CRUD + entity operations
 │   │   ├── fileshare-tools.ts #  8 tools — share/directory/file operations
-│   │   └── utility-tools.ts   #  6 tools — base64, SAS refresh, MIME lookup
+│   │   └── utility-tools.ts   #  7 tools — base64, SAS refresh, MIME lookup, upload info
 │   └── utils/
 │       └── format.ts              # Response formatting (JSON/HTML/MD) utility
 │   └── resources/
@@ -93,7 +93,7 @@ mcp-azure-storage/
 │   │   ├── queue-tools.test.ts     #  7 tests — mock Azure Queue SDK
 │   │   ├── table-tools.test.ts     #  7 tests — mock Azure Tables SDK
 │   │   ├── fileshare-tools.test.ts #  6 tests — mock Azure File Share SDK
-│   │   └── utility-tools.test.ts   #  9 tests — base64, MIME, container name
+│   │   └── utility-tools.test.ts   # 10 tests — base64, MIME, container name, upload URL
 │   ├── resources/
 │   │   ├── blob-resources.test.ts      # 6 tests — list cap, download guard
 │   │   ├── queue-resources.test.ts     # 3 tests — list cap, properties
@@ -130,7 +130,7 @@ mcp-azure-storage/
 
 ## Response Format Option
 
-All 36 tools accept an optional `format` parameter that controls how structured data is returned:
+All 37 tools accept an optional `format` parameter that controls how structured data is returned:
 
 | Value | Description |
 |-------|-------------|
@@ -212,7 +212,7 @@ All 36 tools accept an optional `format` parameter that controls how structured 
 | `fileshare-read-file` | Download file content as base64. Use `util-from-base64` to decode text. |
 | `fileshare-delete-file` | **Destructive** — permanently delete a file from a share. |
 
-### Utilities (6 tools)
+### Utilities (7 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -222,6 +222,7 @@ All 36 tools accept an optional `format` parameter that controls how structured 
 | `util-refresh-container-sas` | Generate a fresh SAS token + connection string for a container. Use to replace an expired container SAS. |
 | `util-get-content-type` | MIME type lookup by file name or extension. Returns `application/octet-stream` for unrecognised types. |
 | `util-to-container-name` | Sanitise arbitrary text (email, URL, display name) into a valid Azure container name. Use BEFORE `blob-container-create`. |
+| `util-get-upload-url` | Get the direct file upload endpoint URL, required fields, and usage examples. Use when uploading large or binary files that exceed base64/JSON-RPC limits. |
 
 ### MCP Resources (12 resources)
 
@@ -881,7 +882,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 
 ## Testing
 
-### Unit Tests (92 tests, no Azure required)
+### Unit Tests (93 tests, no Azure required)
 
 Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
 
@@ -896,7 +897,7 @@ npm run test:watch
 npm run test:coverage
 ```
 
-**Test coverage:** Config, API key middleware, all 36 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
+**Test coverage:** Config, API key middleware, all 37 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
 
 ### Integration Tests (Azurite)
 
