@@ -1,5 +1,5 @@
 /**
- * Utility MCP tools — 6 tools.
+ * Utility MCP tools — 7 tools.
  *
  * Provides helper operations that support the primary storage tools:
  *  - Base64 encoding/decoding — required for text↔base64 conversion when
@@ -8,6 +8,8 @@
  *  - MIME type lookup — identifies content types from file extensions.
  *  - Container name sanitisation — converts free-form text into valid
  *    Azure Storage container names.
+ *  - Upload info — returns the direct file upload endpoint URL and instructions
+ *    (advertises the /upload REST endpoint to MCP clients).
  *
  * @module tools/utility-tools
  */
@@ -25,7 +27,7 @@ import {
 import { getStorageConfig } from "../config.js";
 
 /**
- * Register all 6 utility tools on the given MCP server.
+ * Register all 7 utility tools on the given MCP server.
  *
  * These tools are stateless helpers — they don't maintain any persistent
  * client connections (SAS generation uses short-lived credential objects).
@@ -230,6 +232,60 @@ export function registerUtilityTools(server: McpServer): void {
     async ({ input, prefix, maxLength, format }) => {
       const name = toContainerName(input, prefix, maxLength);
       return formatResponse({ input, containerName: name }, format, "Container Name");
+    }
+  );
+
+  // ── UPLOAD INFO ───────────────────────────────────────────────────────────
+  // Advertises the /upload REST endpoint to MCP clients. Without this tool,
+  // the /upload endpoint is invisible through the MCP tools/list mechanism.
+
+  server.tool(
+    "util-get-upload-url",
+    "Get the direct file upload endpoint URL and usage instructions. " +
+      "The MCP server provides a REST endpoint (POST /upload) that accepts standard multipart form-data uploads — " +
+      "bypassing JSON-RPC entirely. Use this for large or binary files (PDFs, images, videos) that cannot be " +
+      "practically base64-encoded in an MCP tool call. " +
+      "Returns the upload URL, required fields, size limits, and example curl/Python commands. " +
+      "The same API key used for MCP requests authenticates upload requests.",
+    {
+      format: formatSchema,
+    },
+    async ({ format }) => {
+      // Derive the upload URL from the server's own origin.
+      // In production (Azure Container Apps), the HOST header provides the FQDN.
+      // Locally, fall back to localhost.
+      const port = process.env.PORT || "3000";
+      const baseUrl = process.env.WEBSITE_HOSTNAME
+        ? `https://${process.env.WEBSITE_HOSTNAME}`
+        : `http://localhost:${port}`;
+
+      return formatResponse(
+        {
+          uploadUrl: `${baseUrl}/upload`,
+          method: "POST",
+          contentType: "multipart/form-data",
+          authentication: "X-API-Key header (same key as MCP requests)",
+          maxFileSize: "100 MB",
+          fields: {
+            file: "(required) The file to upload — multipart form field",
+            containerName: "(required) Target blob container name",
+            blobName: "(optional) Blob name with path — defaults to the uploaded filename",
+            metadata: '(optional) JSON string of key-value metadata, e.g. {"author":"Alice"}',
+          },
+          examples: {
+            curl: `curl -X POST ${baseUrl}/upload -H "X-API-Key: <key>" -F "file=@./report.pdf" -F "containerName=documents" -F "blobName=reports/report.pdf"`,
+            python: `requests.post("${baseUrl}/upload", headers={"X-API-Key": "<key>"}, files={"file": open("report.pdf", "rb")}, data={"containerName": "documents", "blobName": "reports/report.pdf"})`,
+          },
+          notes: [
+            "This endpoint is NOT part of the MCP JSON-RPC protocol — it is a standard REST endpoint.",
+            "Use 'blob-upload-from-url' if the file is already accessible via a public URL.",
+            "Use 'blob-create' with base64 content for small text files only.",
+            "For files larger than 100 MB, use 'blob-get-container-sas' to get a write SAS URL and upload directly to Azure.",
+          ],
+        },
+        format,
+        "File Upload Endpoint"
+      );
     }
   );
 }
