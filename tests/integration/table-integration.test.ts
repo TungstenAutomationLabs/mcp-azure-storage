@@ -18,10 +18,13 @@ import {
   createTestApp,
   mcpPost,
   toolCallRequest,
+  resourceReadRequest,
   extractToolText,
   extractToolJson,
+  extractResourceContents,
 } from "../helpers/mcp-test-harness.js";
 import { registerTableTools } from "../../src/tools/table-tools.js";
+import { registerTableResources } from "../../src/resources/table-resources.js";
 
 const SKIP = !process.env.TEST_INTEGRATION;
 
@@ -36,9 +39,14 @@ describe.skipIf(SKIP)("table-tools integration (Azurite)", () => {
     const url = process.env.AZURE_TABLE_SERVICE_URL!;
 
     const credential = new AzureNamedKeyCredential(accountName, accountKey);
-    tableServiceClient = new TableServiceClient(url, credential);
+    const isInsecure = url.startsWith("http://");
+    const clientOptions = isInsecure ? { allowInsecureConnection: true } : {};
+    tableServiceClient = new TableServiceClient(url, credential, clientOptions);
 
-    app = createTestApp((server) => registerTableTools(server));
+    app = createTestApp((server) => {
+      registerTableTools(server);
+      registerTableResources(server);
+    });
   });
 
   afterAll(async () => {
@@ -62,10 +70,11 @@ describe.skipIf(SKIP)("table-tools integration (Azurite)", () => {
   it("lists tables including the new one", async () => {
     const res = await mcpPost(
       app,
-      toolCallRequest("table-list")
+      resourceReadRequest("azure-table:///tables")
     ).expect(200);
 
-    const data = extractToolJson(res);
+    const contents = extractResourceContents(res);
+    const data = JSON.parse(contents[0].text);
     const names = data.map((t: any) => t.name);
     expect(names).toContain(tableName);
   });
@@ -85,17 +94,14 @@ describe.skipIf(SKIP)("table-tools integration (Azurite)", () => {
     const upsertData = extractToolJson(upsertRes);
     expect(upsertData.success).toBe(true);
 
-    // Get
+    // Get via resource
     const getRes = await mcpPost(
       app,
-      toolCallRequest("table-entity-get", {
-        tableName,
-        partitionKey: "region-west",
-        rowKey: "order-001",
-      })
+      resourceReadRequest(`azure-table:///tables/${tableName}/entities/region-west/order-001`)
     ).expect(200);
 
-    const entity = extractToolJson(getRes);
+    const contents = extractResourceContents(getRes);
+    const entity = JSON.parse(contents[0].text);
     expect(entity.total).toBe(99.95);
     expect(entity.status).toBe("shipped");
   });

@@ -18,10 +18,13 @@ import {
   createTestApp,
   mcpPost,
   toolCallRequest,
+  resourceReadRequest,
   extractToolText,
   extractToolJson,
+  extractResourceContents,
 } from "../helpers/mcp-test-harness.js";
 import { registerBlobTools } from "../../src/tools/blob-tools.js";
+import { registerBlobResources } from "../../src/resources/blob-resources.js";
 
 const SKIP = !process.env.TEST_INTEGRATION;
 
@@ -40,7 +43,10 @@ describe.skipIf(SKIP)("blob-tools integration (Azurite)", () => {
     const credential = new StorageSharedKeyCredential(accountName, accountKey);
     blobServiceClient = new BlobServiceClient(url, credential);
 
-    app = createTestApp((server) => registerBlobTools(server));
+    app = createTestApp((server) => {
+      registerBlobTools(server);
+      registerBlobResources(server);
+    });
   });
 
   afterAll(async () => {
@@ -66,10 +72,11 @@ describe.skipIf(SKIP)("blob-tools integration (Azurite)", () => {
   it("lists containers including the new one", async () => {
     const res = await mcpPost(
       app,
-      toolCallRequest("blob-container-list")
+      resourceReadRequest("azure-blob:///containers")
     ).expect(200);
 
-    const data = extractToolJson(res);
+    const contents = extractResourceContents(res);
+    const data = JSON.parse(contents[0].text);
     const names = data.map((c: any) => c.name);
     expect(names).toContain(containerName);
   });

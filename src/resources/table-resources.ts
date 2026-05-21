@@ -24,7 +24,9 @@ const config = getStorageConfig();
 const tableCredential = new AzureNamedKeyCredential(config.accountName, config.accountKey);
 const tableServiceUrl =
   config.tableServiceUrl || `https://${config.accountName}.table.core.windows.net`;
-const tableServiceClient = new TableServiceClient(tableServiceUrl, tableCredential);
+const isInsecure = tableServiceUrl.startsWith("http://");
+const tableClientOptions = isInsecure ? { allowInsecureConnection: true } : {};
+const tableServiceClient = new TableServiceClient(tableServiceUrl, tableCredential, tableClientOptions);
 
 /** Maximum number of items returned by listing resources to prevent oversized responses. */
 const MAX_LIST_ITEMS = 500;
@@ -46,7 +48,7 @@ function getTableClient(tableName: string): TableClient {
       const oldestKey = tableClientCache.keys().next().value;
       if (oldestKey) tableClientCache.delete(oldestKey);
     }
-    client = new TableClient(tableServiceUrl, tableName, tableCredential);
+    client = new TableClient(tableServiceUrl, tableName, tableCredential, tableClientOptions);
     tableClientCache.set(tableName, client);
   }
   return client;

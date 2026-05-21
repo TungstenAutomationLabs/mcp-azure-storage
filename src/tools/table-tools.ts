@@ -44,7 +44,9 @@ export function registerTableTools(server: McpServer): void {
   );
   const tableServiceUrl =
     config.tableServiceUrl || `https://${config.accountName}.table.core.windows.net`;
-  const tableServiceClient = new TableServiceClient(tableServiceUrl, credential);
+  const isInsecure = tableServiceUrl.startsWith("http://");
+  const clientOptions = isInsecure ? { allowInsecureConnection: true } : {};
+  const tableServiceClient = new TableServiceClient(tableServiceUrl, credential, clientOptions);
 
   // Per-table clients are cached in a Map. Unlike the service client,
   // TableClient is scoped to a single table, so we create one per table
@@ -65,7 +67,7 @@ export function registerTableTools(server: McpServer): void {
         const oldestKey = tableClientCache.keys().next().value;
         if (oldestKey) tableClientCache.delete(oldestKey);
       }
-      client = new TableClient(tableServiceUrl, tableName, credential);
+      client = new TableClient(tableServiceUrl, tableName, credential, clientOptions);
       tableClientCache.set(tableName, client);
     }
     return client;

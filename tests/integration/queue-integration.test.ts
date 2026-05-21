@@ -18,10 +18,13 @@ import {
   createTestApp,
   mcpPost,
   toolCallRequest,
+  resourceReadRequest,
   extractToolText,
   extractToolJson,
+  extractResourceContents,
 } from "../helpers/mcp-test-harness.js";
 import { registerQueueTools } from "../../src/tools/queue-tools.js";
+import { registerQueueResources } from "../../src/resources/queue-resources.js";
 
 const SKIP = !process.env.TEST_INTEGRATION;
 
@@ -38,7 +41,10 @@ describe.skipIf(SKIP)("queue-tools integration (Azurite)", () => {
     const credential = new StorageSharedKeyCredential(accountName, accountKey);
     queueServiceClient = new QueueServiceClient(url, credential);
 
-    app = createTestApp((server) => registerQueueTools(server));
+    app = createTestApp((server) => {
+      registerQueueTools(server);
+      registerQueueResources(server);
+    });
   });
 
   afterAll(async () => {
@@ -64,11 +70,13 @@ describe.skipIf(SKIP)("queue-tools integration (Azurite)", () => {
   it("lists queues including the new one", async () => {
     const res = await mcpPost(
       app,
-      toolCallRequest("queue-list")
+      resourceReadRequest("azure-queue:///queues")
     ).expect(200);
 
-    const data = extractToolJson(res);
-    expect(data).toContain(queueName);
+    const contents = extractResourceContents(res);
+    const data = JSON.parse(contents[0].text);
+    const names = data.map((q: any) => q.name);
+    expect(names).toContain(queueName);
   });
 
   it("sends and peeks a message", async () => {
