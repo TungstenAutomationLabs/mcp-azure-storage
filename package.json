@@ -19,7 +19,10 @@
     "azd:dev:deploy": "azd deploy --environment mcp-storage-dev",
     "azd:test": "azd up --environment mcp-storage-test",
     "azd:test:provision": "azd provision --environment mcp-storage-test",
-    "azd:test:deploy": "azd deploy --environment mcp-storage-test"
+    "azd:test:deploy": "azd deploy --environment mcp-storage-test",
+    "acr:setup": "pwsh ./scripts/setup-acr.ps1",
+    "acr:push": "pwsh ./scripts/push-to-acr.ps1",
+    "acr:push:tag": "pwsh ./scripts/push-to-acr.ps1 -Tag"
   },
   "keywords": [
     "mcp",
@@ -61,6 +64,6 @@
     "vitest": "^3.1.0"
   },
   "overrides": {
-    "glob": "^11.0.0"
+    "glob": "^13.0.6"
   }
 }

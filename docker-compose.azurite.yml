@@ -15,5 +15,6 @@ services:
       - "10000:10000" # Blob
       - "10001:10001" # Queue
       - "10002:10002" # Table
-    command: "azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --loose"
+    # Temporary: --skipApiVersionCheck needed until Azurite supports API version 2026-02-06 (used by @azure/storage-blob@12.31.0)
+    command: "azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --loose --skipApiVersionCheck"
     restart: unless-stopped

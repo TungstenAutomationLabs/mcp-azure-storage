@@ -31,7 +31,7 @@ RUN npx tsc
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — minimal production image
 # ---------------------------------------------------------------------------
-FROM node:20-alpine
+FROM node:20-alpine AS production
 
 # Create a non-root user/group for least-privilege execution.
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
