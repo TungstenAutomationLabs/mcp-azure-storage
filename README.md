@@ -108,6 +108,7 @@ mcp-azure-storage/
 ├── infra/
 │   ├── main.bicep             # Azure Container Apps + Storage + Identity + RBAC
 │   └── main.parameters.json   # azd-templated deployment parameters
+├── deploy_to_azure.ps1        # One-command deploy script (reads .env, syncs to azd, deploys)
 ├── .github/workflows/
 │   └── ci.yml                 # GitHub Actions — unit + integration tests
 ├── docker-compose.azurite.yml # Azurite emulator for local integration tests
@@ -628,14 +629,42 @@ Claude Desktop does not natively support remote HTTP MCP servers — it only con
 
 ## Deploy to Azure
 
-### 1. Login
+### Quick Deploy (Recommended)
+
+The [`deploy_to_azure.ps1`](deploy_to_azure.ps1) script automates the entire deployment process. It reads your `.env` file, syncs the relevant variables into the azd environment, and runs `azd up` — so you only need to maintain **one `.env` file** for both local development and Azure deployment.
+
+```powershell
+# Full provision + deploy (reads .env, syncs to azd, runs azd up)
+.\deploy_to_azure.ps1
+
+# Code-only redeploy — faster, skips Bicep infrastructure provisioning
+.\deploy_to_azure.ps1 -SkipProvision
+
+# Use a different env file
+.\deploy_to_azure.ps1 -EnvFile ".env.production"
+```
+
+**What the script does:**
+1. Parses your `.env` file for uncommented `KEY=VALUE` lines
+2. Syncs `AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_STORAGE_ACCOUNT_KEY`, and `MCP_API_KEY` into the active azd environment
+3. Shows a deployment summary with confirmation prompt
+4. Runs `azd up` (or `azd deploy` with `-SkipProvision`)
+5. Displays the MCP endpoint URL on success
+
+> **Prerequisites:** You must have run `az login`, `azd auth login`, and `azd init` at least once before using the script. See the manual steps below if this is your first deployment.
+
+---
+
+### Manual Deployment
+
+#### 1. Login
 
 ```bash
 az login
 azd auth login
 ```
 
-### 2. Initialize (first time only)
+#### 2. Initialize (first time only)
 
 ```bash
 azd init
@@ -643,7 +672,7 @@ azd init
 
 This prompts you for an **environment name** (e.g. `mcp-azure-storage-dev`), **Azure subscription**, and **location**. It creates a `.azure/<env-name>/.env` file to store configuration for subsequent commands.
 
-### 3. Set deployment variables
+#### 3. Set deployment variables
 
 azd stores environment variables in `.azure/<env-name>/.env`. Some are set automatically by `azd init`; others need to be set manually. See [`.azure.env.example`](.azure.env.example) for the full template with descriptions.
 
@@ -714,15 +743,15 @@ Leave them **unset** to have Bicep provision a new storage account automatically
 
 > **Multiple environments (dev, test, prod):** `azd` supports named environments out of the box — each with its own subscription, region, and secrets. See the **[Multi-Environment Deployment Guide](ENVIRONMENTS.md)** for step-by-step instructions on creating, switching, and deploying to separate dev and test environments.
 
-### 4. Deploy
+#### 4. Deploy
 
-#### Option A — Single command
+##### Option A — Single command
 
 ```bash
 azd up
 ```
 
-#### Option B — Step-by-step (provision then deploy separately)
+##### Option B — Step-by-step (provision then deploy separately)
 
 If `azd up` fails, times out, or you need more control, run the two phases individually:
 
@@ -745,7 +774,7 @@ Both options provision via Bicep:
 - **RBAC** — AcrPull + Blob, Queue, and Table Data Contributor roles (all assigned before the Container App is created)
 - **Secrets** — MCP_API_KEY and Storage Account Key injected securely
 
-### 5. Test the deployed endpoint
+#### 5. Test the deployed endpoint
 
 ```bash
 curl -X POST https://<your-app>.azurecontainerapps.io/mcp \
@@ -755,7 +784,7 @@ curl -X POST https://<your-app>.azurecontainerapps.io/mcp \
   -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}'
 ```
 
-### 6. Check deployment status
+#### 6. Check deployment status
 
 Use `azd show` to view the current state of all provisioned resources and service endpoints:
 
@@ -779,7 +808,7 @@ az containerapp show \
   -o table
 ```
 
-### 7. Redeploy after code changes
+#### 7. Redeploy after code changes
 
 After modifying source code, rebuild and redeploy the container with:
 
@@ -795,7 +824,7 @@ If you have also changed the Bicep infrastructure files (e.g. `infra/main.bicep`
 azd up
 ```
 
-### 8. Tear down the deployment
+#### 8. Tear down the deployment
 
 To delete **all** Azure resources created by `azd up` (Resource Group, Container App, Storage Account, Container Registry, etc.):
 
@@ -877,6 +906,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 | `azd:test` | `npm run azd:test` | Provision + deploy to test environment |
 | `azd:test:provision` | `npm run azd:test:provision` | Provision test infrastructure only |
 | `azd:test:deploy` | `npm run azd:test:deploy` | Deploy app to test only (skip provision) |
+| — | `.\deploy_to_azure.ps1` | Reads `.env`, syncs vars to azd env, runs `azd up` (add `-SkipProvision` for code-only deploy) |
 
 ---
 
