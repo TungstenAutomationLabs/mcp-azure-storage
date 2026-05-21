@@ -1004,6 +1004,52 @@ docker run -p 3000:3000 \
   mcp-azure-storage
 ```
 
+### Container Registry (ACR)
+
+Push the Docker image directly to Azure Container Registry using the included scripts.
+
+#### Prerequisites
+
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) (`az`)
+- [Docker](https://docs.docker.com/get-docker/)
+- [Trivy](https://aquasecurity.github.io/trivy/) (optional — for vulnerability scanning)
+- PowerShell 7+ (`pwsh`)
+
+#### Setup
+
+1. Set `ACR_NAME` in your `.env` file:
+   ```
+   ACR_NAME=your-acr-name
+   ```
+
+2. Create the registry (one-time):
+   ```bash
+   npm run acr:setup -- -ResourceGroup rg-mcp-storage
+   ```
+   Optional parameters: `-Location` (default: `uksouth`), `-Sku` (default: `Basic`)
+
+#### Push Image
+
+```bash
+# Build, scan, and push with 'latest' tag
+npm run acr:push
+
+# Push with a specific tag
+npm run acr:push:tag -- v1.0.0
+
+# Skip Trivy scan
+npm run acr:push -- -SkipScan
+
+# Reuse existing local image (skip build)
+npm run acr:push -- -SkipBuild
+```
+
+The push script will:
+1. Login to ACR via Azure CLI
+2. Build the Docker image (multi-stage, `production` target)
+3. Run a Trivy vulnerability scan (CRITICAL severity — aborts on findings)
+4. Push the image to `<acr-name>.azurecr.io/mcp-azure-storage:<tag>`
+
 ---
 
 ## Contributing

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Create an Azure Container Registry for mcp-azure-storage.
 
@@ -26,7 +26,7 @@ Push-Location $PSScriptRoot/..
 try {
     . ./scripts/helpers/common.ps1
 
-    Write-Info "=== MCP Azure Storage — ACR Setup ==="
+    Write-Info "=== MCP Azure Storage -- ACR Setup ==="
 
     Load-EnvFile ".env"
     $AcrName = Get-EnvVar "ACR_NAME"

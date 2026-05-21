@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Build, scan, and push the mcp-azure-storage Docker image to Azure Container Registry.
 
@@ -29,7 +29,7 @@ try {
     # Load helpers
     . ./scripts/helpers/common.ps1
 
-    Write-Info "=== MCP Azure Storage — ACR Push ==="
+    Write-Info "=== MCP Azure Storage -- ACR Push ==="
 
     # Load .env and read ACR_NAME
     Load-EnvFile ".env"
