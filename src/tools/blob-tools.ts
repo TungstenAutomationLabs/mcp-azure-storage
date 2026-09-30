@@ -143,7 +143,7 @@ export function registerBlobTools(server: McpServer): void {
 
   server.tool(
     "blob-list",
-    "List blobs in a container, optionally filtered by a virtual directory prefix. Use this to browse container contents or find blobs under a specific path. Returns an array of objects with 'name', 'contentLength' (bytes), 'contentType', 'createdOn', 'lastModified', and optionally 'metadata' for each blob. Only blobs with size > 0 are included (empty marker blobs are excluded).",
+    "List blobs in a container, optionally filtered by a virtual directory prefix. Use this to browse container contents or find blobs under a specific path. Returns an array of objects with 'name', 'contentLength' (bytes), 'contentType', 'createdOn', 'lastModified', and optionally 'metadata' for each blob. Only blobs with size > 0 are included (empty marker blobs are excluded). Set includeEmpty=true to include zero-byte blobs (e.g. for auditing or sweep operations).",
     {
       containerName: z.string().describe("Name of the container to list blobs from (e.g. 'my-data-2024')"),
       directory: z
@@ -156,9 +156,14 @@ export function registerBlobTools(server: McpServer): void {
         .optional()
         .default(true)
         .describe("When true, includes custom metadata key-value pairs in each result object"),
+      includeEmpty: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("When true, includes zero-byte blobs in the results (e.g. empty source files, failed writes). Defaults to false to exclude empty directory-marker blobs."),
       format: formatSchema,
     },
-    async ({ containerName, directory, includeMetadata, format }) => {
+    async ({ containerName, directory, includeMetadata, includeEmpty, format }) => {
       const client = blobServiceClient;
       const containerClient = client.getContainerClient(containerName);
 
@@ -188,29 +193,30 @@ export function registerBlobTools(server: McpServer): void {
         metadata?: Record<string, string>;
       }[] = [];
       for await (const blob of containerClient.listBlobsFlat(listOptions)) {
-        if (
-          blob.properties.contentLength &&
-          blob.properties.contentLength > 0
-        ) {
-          const item: {
-            name: string;
-            contentLength?: number;
-            contentType?: string;
-            createdOn?: Date;
-            lastModified?: Date;
-            metadata?: Record<string, string>;
-          } = {
-            name: blob.name,
-            contentLength: blob.properties.contentLength,
-            contentType: blob.properties.contentType,
-            createdOn: blob.properties.createdOn,
-            lastModified: blob.properties.lastModified,
-          };
-          if (includeMetadata && blob.metadata) {
-            item.metadata = blob.metadata;
-          }
-          results.push(item);
+        // Skip zero-byte blobs (e.g. directory markers) unless includeEmpty is set
+        const length = blob.properties.contentLength ?? 0;
+        if (!includeEmpty && length === 0) {
+          continue;
         }
+
+        const item: {
+          name: string;
+          contentLength?: number;
+          contentType?: string;
+          createdOn?: Date;
+          lastModified?: Date;
+          metadata?: Record<string, string>;
+        } = {
+          name: blob.name,
+          contentLength: blob.properties.contentLength,
+          contentType: blob.properties.contentType,
+          createdOn: blob.properties.createdOn,
+          lastModified: blob.properties.lastModified,
+        };
+        if (includeMetadata && blob.metadata) {
+          item.metadata = blob.metadata;
+        }
+        results.push(item);
       }
       return formatResponse(results, format, "Blobs");
     }

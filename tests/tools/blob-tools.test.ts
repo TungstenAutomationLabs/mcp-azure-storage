@@ -91,6 +91,103 @@ describe("blob-tools", () => {
 
   // blob-container-list removed — use azure-blob:///containers resource instead
 
+  describe("blob-list", () => {
+    /** Helper to make mockListBlobsFlat return an async iterable of blobs */
+    function mockBlobList(blobs: { name: string; contentLength: number | undefined; contentType?: string; metadata?: Record<string, string> }[]) {
+      mockListBlobsFlat.mockReturnValue({
+        [Symbol.asyncIterator]: async function* () {
+          for (const b of blobs) {
+            yield {
+              name: b.name,
+              properties: {
+                contentLength: b.contentLength,
+                contentType: b.contentType ?? "application/octet-stream",
+                createdOn: new Date("2026-01-01"),
+                lastModified: new Date("2026-01-01"),
+              },
+              metadata: b.metadata,
+            };
+          }
+        },
+      });
+    }
+
+    it("excludes zero-byte blobs by default", async () => {
+      mockBlobList([
+        { name: "real-file.txt", contentLength: 42 },
+        { name: "empty-marker/", contentLength: 0 },
+        { name: "empty-file.txt", contentLength: 0 },
+      ]);
+
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-list", { containerName: "test" })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data).toHaveLength(1);
+      expect(data[0].name).toBe("real-file.txt");
+    });
+
+    it("excludes blobs with undefined contentLength by default", async () => {
+      mockBlobList([
+        { name: "real-file.txt", contentLength: 42 },
+        { name: "undefined-length.txt", contentLength: undefined },
+      ]);
+
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-list", { containerName: "test" })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data).toHaveLength(1);
+      expect(data[0].name).toBe("real-file.txt");
+    });
+
+    it("includes zero-byte blobs when includeEmpty is true", async () => {
+      mockBlobList([
+        { name: "real-file.txt", contentLength: 42 },
+        { name: "empty-marker/", contentLength: 0 },
+        { name: "empty-file.txt", contentLength: 0 },
+      ]);
+
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-list", {
+          containerName: "test",
+          includeEmpty: true,
+        })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data).toHaveLength(3);
+      const names = data.map((b: any) => b.name);
+      expect(names).toContain("real-file.txt");
+      expect(names).toContain("empty-marker/");
+      expect(names).toContain("empty-file.txt");
+    });
+
+    it("returns empty array when all blobs are zero-byte and includeEmpty is false", async () => {
+      mockBlobList([
+        { name: "marker1/", contentLength: 0 },
+        { name: "marker2/", contentLength: 0 },
+      ]);
+
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-list", { containerName: "test" })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data).toHaveLength(0);
+    });
+  });
+
   describe("blob-container-create", () => {
     it("creates container when it does not exist", async () => {
       mockExists.mockResolvedValue(false);
