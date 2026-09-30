@@ -36,13 +36,12 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "crypto";
 import {
   BlobServiceClient,
-  StorageSharedKeyCredential,
   ContainerSASPermissions,
   generateBlobSASQueryParameters,
   SASProtocol,
 } from "@azure/storage-blob";
 import { apiKeyAuth } from "./middleware/api-key.js";
-import { getStorageConfig } from "./config.js";
+import { getStorageConfig, getCredential, getSharedKeyCredential, hasSharedKey } from "./config.js";
 import { registerBlobTools } from "./tools/blob-tools.js";
 import { registerTableTools } from "./tools/table-tools.js";
 import { registerQueueTools } from "./tools/queue-tools.js";
@@ -463,11 +462,11 @@ const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
 // crashing at import time if env vars are not yet set.
 let _uploadBlobServiceClient: BlobServiceClient | null = null;
 
-function getUploadBlobServiceClient(): BlobServiceClient {
+async function getUploadBlobServiceClient(): Promise<BlobServiceClient> {
   if (_uploadBlobServiceClient) return _uploadBlobServiceClient;
 
   const config = getStorageConfig();
-  const credential = new StorageSharedKeyCredential(config.accountName, config.accountKey);
+  const credential = await getCredential();
   const blobServiceUrl = config.blobServiceUrl || `https://${config.accountName}.blob.core.windows.net`;
   _uploadBlobServiceClient = new BlobServiceClient(blobServiceUrl, credential);
   return _uploadBlobServiceClient;
@@ -514,10 +513,10 @@ function uploadSizeGuard(req: Request, res: Response, next: NextFunction): void 
     const containerName = req.query.containerName as string | undefined;
     const blobName = req.query.blobName as string | undefined;
 
-    if (containerName && blobName) {
+    if (containerName && blobName && hasSharedKey()) {
       try {
         const config = getStorageConfig();
-        const credential = new StorageSharedKeyCredential(config.accountName, config.accountKey);
+        const credential = getSharedKeyCredential();
         const expiresOn = new Date();
         expiresOn.setHours(expiresOn.getHours() + 1);
 
@@ -534,7 +533,7 @@ function uploadSizeGuard(req: Request, res: Response, next: NextFunction): void 
 
         directUploadUrl = `https://${config.accountName}.blob.core.windows.net/${containerName}/${blobName}?${sasToken}`;
       } catch {
-        // Config not available yet — skip the SAS URL
+        // Config not available or no shared key — skip the SAS URL
       }
     }
 
@@ -591,7 +590,7 @@ app.post("/upload", apiKeyAuth, uploadSizeGuard, upload.single("file"), async (r
       }
     }
 
-    const blobServiceClient = getUploadBlobServiceClient();
+    const blobServiceClient = await getUploadBlobServiceClient();
     const containerClient = blobServiceClient.getContainerClient(containerName);
     const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 

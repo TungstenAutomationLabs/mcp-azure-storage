@@ -28,28 +28,38 @@ import {
   BlobSASPermissions,
   SASProtocol,
 } from "@azure/storage-blob";
-import { getStorageConfig } from "../config.js";
+import {
+  getStorageConfig,
+  getCredential,
+  getSharedKeyCredential,
+  hasSharedKey,
+} from "../config.js";
 
 /**
  * Register all 11 Blob Storage tools on the given MCP server.
  *
- * Creates a singleton BlobServiceClient that reuses the internal HTTP
+ * Uses a lazy singleton BlobServiceClient that reuses the internal HTTP
  * connection pool across all tool invocations for better performance.
+ * The client is created on first tool invocation (not at registration time)
+ * because credential creation may be async in managed identity mode.
  */
 export function registerBlobTools(server: McpServer): void {
   const config = getStorageConfig();
 
-  // Singleton client — created once, shared across all tool calls.
-  // Azure SDK clients manage an internal HTTP pipeline with connection
-  // pooling, retry policies, and telemetry. Reusing them avoids the
-  // overhead of recreating these on every request.
-  const credential = new StorageSharedKeyCredential(
-    config.accountName,
-    config.accountKey
-  );
-  const blobServiceUrl =
-    config.blobServiceUrl || `https://${config.accountName}.blob.core.windows.net`;
-  const blobServiceClient = new BlobServiceClient(blobServiceUrl, credential);
+  // Lazy singleton — created on first tool invocation, then reused.
+  // Async because getCredential() dynamically imports @azure/identity
+  // in managed identity mode.
+  let _blobServiceClient: BlobServiceClient | null = null;
+
+  async function getBlobServiceClient(): Promise<BlobServiceClient> {
+    if (_blobServiceClient) return _blobServiceClient;
+
+    const credential = await getCredential();
+    const blobServiceUrl =
+      config.blobServiceUrl || `https://${config.accountName}.blob.core.windows.net`;
+    _blobServiceClient = new BlobServiceClient(blobServiceUrl, credential);
+    return _blobServiceClient;
+  }
 
   // ──────────────────────────────────────────────────────────────
   // CONTAINER OPERATIONS
@@ -65,7 +75,7 @@ export function registerBlobTools(server: McpServer): void {
         .describe("Container name (3-63 chars, lowercase letters, numbers, and hyphens only, e.g. 'my-data-2024'). Use 'util-to-container-name' to sanitise arbitrary text."),
     },
     async ({ containerName }) => {
-      const client = blobServiceClient;
+      const client = await getBlobServiceClient();
       const containerClient = client.getContainerClient(containerName);
       const exists = await containerClient.exists();
       if (!exists) {
@@ -97,7 +107,7 @@ export function registerBlobTools(server: McpServer): void {
       containerName: z.string().describe("Name of the container to delete (e.g. 'my-data-2024')"),
     },
     async ({ containerName }) => {
-      const client = blobServiceClient;
+      const client = await getBlobServiceClient();
       const containerClient = client.getContainerClient(containerName);
       const exists = await containerClient.exists();
       if (exists) {
@@ -130,7 +140,7 @@ export function registerBlobTools(server: McpServer): void {
       format: formatSchema,
     },
     async ({ containerName, format }) => {
-      const client = blobServiceClient;
+      const client = await getBlobServiceClient();
       const containerClient = client.getContainerClient(containerName);
       const exists = await containerClient.exists();
       return formatResponse({ exists }, format, "Container Exists");
@@ -164,7 +174,7 @@ export function registerBlobTools(server: McpServer): void {
       format: formatSchema,
     },
     async ({ containerName, directory, includeMetadata, includeEmpty, format }) => {
-      const client = blobServiceClient;
+      const client = await getBlobServiceClient();
       const containerClient = client.getContainerClient(containerName);
 
       const listOptions: {
@@ -238,7 +248,7 @@ export function registerBlobTools(server: McpServer): void {
       format: formatSchema,
     },
     async ({ containerName, blobName, contentBase64, metadata, format }) => {
-      const client = blobServiceClient;
+      const client = await getBlobServiceClient();
       const containerClient = client.getContainerClient(containerName);
       const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
@@ -282,14 +292,12 @@ export function registerBlobTools(server: McpServer): void {
       format: formatSchema,
     },
     async ({ containerName, blobName, returnUrl, sasExpiryHours, format }) => {
-      const client = blobServiceClient;
+      const client = await getBlobServiceClient();
       const containerClient = client.getContainerClient(containerName);
 
       if (returnUrl) {
-        // Return a SAS URL for direct access
+        // Return a SAS URL for direct access (requires shared key)
         const sasToken = generateBlobSas(
-          config.accountName,
-          config.accountKey,
           containerName,
           blobName,
           sasExpiryHours
@@ -324,7 +332,7 @@ export function registerBlobTools(server: McpServer): void {
       format: formatSchema,
     },
     async ({ containerName, blobName, format }) => {
-      const client = blobServiceClient;
+      const client = await getBlobServiceClient();
       const containerClient = client.getContainerClient(containerName);
       const blockBlobClient = containerClient.getBlockBlobClient(blobName);
       await blockBlobClient.delete({ deleteSnapshots: "include" });
@@ -344,7 +352,7 @@ export function registerBlobTools(server: McpServer): void {
       format: formatSchema,
     },
     async ({ containerName, blobName, metadata, format }) => {
-      const client = blobServiceClient;
+      const client = await getBlobServiceClient();
       const containerClient = client.getContainerClient(containerName);
       const blobClient = containerClient.getBlobClient(blobName);
       await blobClient.setMetadata(metadata);
@@ -380,8 +388,6 @@ export function registerBlobTools(server: McpServer): void {
     },
     async ({ containerName, blobName, expiryHours, permissions, format }) => {
       const sasToken = generateBlobSas(
-        config.accountName,
-        config.accountKey,
         containerName,
         blobName,
         expiryHours,
@@ -411,10 +417,7 @@ export function registerBlobTools(server: McpServer): void {
       const expiresOn = new Date();
       expiresOn.setHours(expiresOn.getHours() + expiryHours);
 
-      const credential = new StorageSharedKeyCredential(
-        config.accountName,
-        config.accountKey
-      );
+      const credential = getSharedKeyCredential();
       const sasToken = generateBlobSASQueryParameters(
         {
           containerName,
@@ -483,7 +486,8 @@ export function registerBlobTools(server: McpServer): void {
         response.headers.get("content-type")?.split(";")[0]?.trim() ||
         determineContentType(blobName);
 
-      const containerClient = blobServiceClient.getContainerClient(containerName);
+      const blobClient = await getBlobServiceClient();
+      const containerClient = blobClient.getContainerClient(containerName);
       const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
       await blockBlobClient.uploadData(buffer, {
@@ -585,14 +589,12 @@ function assertSafeUrl(url: string): void {
  * @returns The SAS query string (without leading '?').
  */
 function generateBlobSas(
-  accountName: string,
-  accountKey: string,
   containerName: string,
   blobName: string,
   expiryHours: number,
   permissions: string = "r"
 ): string {
-  const credential = new StorageSharedKeyCredential(accountName, accountKey);
+  const credential = getSharedKeyCredential();
   const expiresOn = new Date();
   expiresOn.setHours(expiresOn.getHours() + expiryHours);
 

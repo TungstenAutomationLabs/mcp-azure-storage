@@ -54,8 +54,12 @@ vi.mock("../src/config.js", () => ({
   getStorageConfig: vi.fn().mockReturnValue({
     accountName: "devstoreaccount1",
     accountKey: "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+    useManagedIdentity: false,
     blobServiceUrl: "http://127.0.0.1:10000/devstoreaccount1",
   }),
+  getCredential: vi.fn().mockResolvedValue({}),
+  getSharedKeyCredential: vi.fn().mockReturnValue({}),
+  hasSharedKey: vi.fn().mockReturnValue(true),
 }));
 
 describe("POST /upload", () => {

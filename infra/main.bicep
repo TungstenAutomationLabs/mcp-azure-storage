@@ -399,6 +399,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'MCP_API_KEY'
               secretRef: 'mcp-api-key'
             }
+            {
+              // Set to 'true' to use DefaultAzureCredential (managed identity)
+              // instead of StorageSharedKeyCredential for data operations.
+              // When enabled, AZURE_STORAGE_ACCOUNT_KEY is still used for SAS
+              // token generation; data ops use the Container App's identity.
+              name: 'AZURE_USE_MANAGED_IDENTITY'
+              value: 'false'
+            }
           ]
         }
       ]

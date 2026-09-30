@@ -34,3 +34,12 @@ npm-debug.log*
 
 # local run files
 bin/
+
+# Roo code:
+.roo/
+
+# MCP files with secrets:
+mcp.json
+
+# Plans:
+plans/

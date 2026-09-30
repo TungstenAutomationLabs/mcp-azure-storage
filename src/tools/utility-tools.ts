@@ -18,13 +18,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatSchema, formatResponse } from "../utils/format.js";
 import {
-  StorageSharedKeyCredential,
   generateBlobSASQueryParameters,
   BlobSASPermissions,
   ContainerSASPermissions,
   SASProtocol,
 } from "@azure/storage-blob";
-import { getStorageConfig } from "../config.js";
+import { getStorageConfig, getSharedKeyCredential } from "../config.js";
 
 /**
  * Register all 7 utility tools on the given MCP server.
@@ -110,10 +109,7 @@ export function registerUtilityTools(server: McpServer): void {
       format: formatSchema,
     },
     async ({ containerName, blobName, expiryHours, permissions, format }) => {
-      const credential = new StorageSharedKeyCredential(
-        config.accountName,
-        config.accountKey
-      );
+      const credential = getSharedKeyCredential();
       const expiresOn = new Date();
       expiresOn.setHours(expiresOn.getHours() + expiryHours);
 
@@ -158,10 +154,7 @@ export function registerUtilityTools(server: McpServer): void {
       format: formatSchema,
     },
     async ({ containerName, expiryHours, permissions, format }) => {
-      const credential = new StorageSharedKeyCredential(
-        config.accountName,
-        config.accountKey
-      );
+      const credential = getSharedKeyCredential();
       const expiresOn = new Date();
       expiresOn.setHours(expiresOn.getHours() + expiryHours);
 
