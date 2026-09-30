@@ -222,6 +222,70 @@ resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
+// ── Lifecycle Management Policy (only for newly-provisioned storage) ──
+// Automatically transitions blobs between access tiers based on age,
+// reducing storage costs without any application code changes.
+//
+// Rules:
+//   1. All block blobs → Cool tier after 30 days of no modification
+//   2. Blobs under backups/ or archives/ → Archive tier after 90 days
+//
+// Only applies to new storage accounts. BYOSA customers manage their own
+// lifecycle policies. These thresholds are sensible defaults; adjust by
+// editing the daysAfterModificationGreaterThan values below.
+resource lifecyclePolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = if (!useExistingStorage) {
+  parent: storageAccount
+  name: 'default'
+  properties: {
+    policy: {
+      rules: [
+        {
+          name: 'cool-after-30-days'
+          enabled: true
+          type: 'Lifecycle'
+          definition: {
+            actions: {
+              baseBlob: {
+                tierToCool: {
+                  daysAfterModificationGreaterThan: 30
+                }
+              }
+            }
+            filters: {
+              blobTypes: [
+                'blockBlob'
+              ]
+            }
+          }
+        }
+        {
+          name: 'archive-after-90-days'
+          enabled: true
+          type: 'Lifecycle'
+          definition: {
+            actions: {
+              baseBlob: {
+                tierToArchive: {
+                  daysAfterModificationGreaterThan: 90
+                }
+              }
+            }
+            filters: {
+              blobTypes: [
+                'blockBlob'
+              ]
+              prefixMatch: [
+                'backups/'
+                'archives/'
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+
 // ── Resolved storage values ──────────────────────────────────
 // These variables select between BYOSA and newly-provisioned values.
 // Used by the Container App's env vars and secrets.
