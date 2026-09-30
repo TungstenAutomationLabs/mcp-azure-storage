@@ -22,15 +22,27 @@
  */
 
 import "dotenv/config"; // Load .env file into process.env (local dev only; ignored in production)
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import multer from "multer";
+import { createReadStream } from "fs";
+import { unlink } from "fs/promises";
+import { tmpdir } from "os";
+import path from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "crypto";
+import {
+  BlobServiceClient,
+  StorageSharedKeyCredential,
+  ContainerSASPermissions,
+  generateBlobSASQueryParameters,
+  SASProtocol,
+} from "@azure/storage-blob";
 import { apiKeyAuth } from "./middleware/api-key.js";
+import { getStorageConfig } from "./config.js";
 import { registerBlobTools } from "./tools/blob-tools.js";
 import { registerTableTools } from "./tools/table-tools.js";
 import { registerQueueTools } from "./tools/queue-tools.js";
@@ -417,13 +429,16 @@ app.get("/health", (_req: Request, res: Response) => {
 // POST /upload — Direct file upload via multipart form-data
 //
 // This REST endpoint bypasses the MCP JSON-RPC transport entirely, allowing
-// any HTTP client (curl, Python, browser, CI/CD) to upload files of any size
-// directly to Azure Blob Storage without base64 encoding.
+// any HTTP client (curl, Python, browser, CI/CD) to upload files directly
+// to Azure Blob Storage without base64 encoding.
 //
-// This solves the "large file" problem: MCP is JSON-RPC, so binary content
-// must be base64-encoded in JSON — impractical for multi-MB files when the
-// LLM context window can't hold the encoded string. This endpoint accepts
-// standard multipart/form-data uploads instead.
+// Files are written to a temp directory on disk (not buffered in RAM), then
+// streamed to Azure Blob Storage via uploadStream. This avoids OOM errors
+// for large files.
+//
+// If Content-Length exceeds MAX_UPLOAD_SIZE_BYTES, the request is rejected
+// early with a 413 response that includes a pre-signed write SAS URL so
+// the caller can upload directly to Azure Storage, bypassing this server.
 //
 // Usage:
 //   curl -X POST https://<host>/upload \
@@ -435,22 +450,122 @@ app.get("/health", (_req: Request, res: Response) => {
 // Security: Protected by the same API key middleware as /mcp.
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Multer stores uploaded files in memory (Buffer). The 100MB limit matches
-// Azure Container Apps' default request body limit. For very large files,
-// consider using blob-get-container-sas to generate a write SAS URL and
-// uploading directly to Azure Storage from the client.
+// ── Upload size limit ────────────────────────────────────────────────────────
+// Configurable via MAX_UPLOAD_SIZE_MB env var (default: 500 MB).
+// Files larger than this should be uploaded directly to Azure using a write
+// SAS URL (returned in the 413 error response).
+const MAX_UPLOAD_SIZE_MB = parseInt(process.env.MAX_UPLOAD_SIZE_MB || "500", 10);
+const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
+// ── Singleton BlobServiceClient for /upload ──────────────────────────────────
+// Reuses the same HTTP connection pool across all upload requests, matching
+// the pattern in blob-tools.ts. Lazy-initialised on first use to avoid
+// crashing at import time if env vars are not yet set.
+let _uploadBlobServiceClient: BlobServiceClient | null = null;
+
+function getUploadBlobServiceClient(): BlobServiceClient {
+  if (_uploadBlobServiceClient) return _uploadBlobServiceClient;
+
+  const config = getStorageConfig();
+  const credential = new StorageSharedKeyCredential(config.accountName, config.accountKey);
+  const blobServiceUrl = config.blobServiceUrl || `https://${config.accountName}.blob.core.windows.net`;
+  _uploadBlobServiceClient = new BlobServiceClient(blobServiceUrl, credential);
+  return _uploadBlobServiceClient;
+}
+
+// Multer writes uploaded files to a temp directory on disk instead of
+// buffering in memory. This prevents OOM for large files. Temp files are
+// cleaned up in the request handler's finally block.
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+  storage: multer.diskStorage({
+    destination: tmpdir(),
+    filename: (_req, file, cb) => {
+      // Unique filename to avoid collisions from concurrent uploads
+      const unique = `mcp-upload-${Date.now()}-${randomUUID()}`;
+      const ext = path.extname(file.originalname || "");
+      cb(null, `${unique}${ext}`);
+    },
+  }),
+  limits: { fileSize: MAX_UPLOAD_SIZE_BYTES },
 });
 
-app.post("/upload", apiKeyAuth, upload.single("file"), async (req: Request, res: Response) => {
+/**
+ * Content-Length pre-check middleware.
+ *
+ * If the Content-Length header indicates a file larger than the configured
+ * limit, reject immediately with 413 and a helpful JSON body. For requests
+ * that include a containerName and blobName in the query string or are
+ * parseable, we include a pre-signed write SAS URL so the caller can upload
+ * directly to Azure Storage instead.
+ *
+ * This fires BEFORE Multer starts consuming the request body, so the
+ * connection is closed cleanly — no partial reads, no hung streams.
+ */
+function uploadSizeGuard(req: Request, res: Response, next: NextFunction): void {
+  const contentLength = parseInt(req.headers["content-length"] || "0", 10);
+
+  if (contentLength > MAX_UPLOAD_SIZE_BYTES) {
+    const sizeMB = (contentLength / (1024 * 1024)).toFixed(1);
+    const limitMB = MAX_UPLOAD_SIZE_MB;
+
+    // Best-effort: generate a write SAS URL if we can parse enough from the request
+    // to know the container. Query params are available before body parsing.
+    let directUploadUrl: string | undefined;
+    const containerName = req.query.containerName as string | undefined;
+    const blobName = req.query.blobName as string | undefined;
+
+    if (containerName && blobName) {
+      try {
+        const config = getStorageConfig();
+        const credential = new StorageSharedKeyCredential(config.accountName, config.accountKey);
+        const expiresOn = new Date();
+        expiresOn.setHours(expiresOn.getHours() + 1);
+
+        const sasToken = generateBlobSASQueryParameters(
+          {
+            containerName,
+            permissions: ContainerSASPermissions.parse("rwl"),
+            startsOn: new Date(),
+            expiresOn,
+            protocol: SASProtocol.HttpsAndHttp,
+          },
+          credential
+        ).toString();
+
+        directUploadUrl = `https://${config.accountName}.blob.core.windows.net/${containerName}/${blobName}?${sasToken}`;
+      } catch {
+        // Config not available yet — skip the SAS URL
+      }
+    }
+
+    res.status(413).json({
+      error: `File too large: ${sizeMB} MB exceeds the ${limitMB} MB upload limit.`,
+      suggestion: "Upload directly to Azure Blob Storage using the SAS URL below, or use 'blob-get-container-sas' with write permissions to generate one.",
+      ...(directUploadUrl && {
+        directUploadUrl,
+        directUploadMethod: "PUT",
+        directUploadHeaders: { "x-ms-blob-type": "BlockBlob" },
+        expiresInHours: 1,
+      }),
+    });
+    return;
+  }
+
+  next();
+}
+
+app.post("/upload", apiKeyAuth, uploadSizeGuard, upload.single("file"), async (req: Request, res: Response) => {
+  let tempFilePath: string | undefined;
+
   try {
     const file = req.file;
     if (!file) {
       res.status(400).json({ error: "No file provided. Send a multipart form with a 'file' field." });
       return;
     }
+
+    // Track the temp file path for cleanup
+    tempFilePath = file.path;
 
     const containerName = req.body.containerName;
     if (!containerName) {
@@ -476,15 +591,7 @@ app.post("/upload", apiKeyAuth, upload.single("file"), async (req: Request, res:
       }
     }
 
-    // Lazy-load storage config and create client (same pattern as blob-tools.ts)
-    const { getStorageConfig } = await import("./config.js");
-    const config = getStorageConfig();
-    const { BlobServiceClient, StorageSharedKeyCredential } = await import("@azure/storage-blob");
-
-    const credential = new StorageSharedKeyCredential(config.accountName, config.accountKey);
-    const blobServiceUrl = config.blobServiceUrl || `https://${config.accountName}.blob.core.windows.net`;
-    const blobServiceClient = new BlobServiceClient(blobServiceUrl, credential);
-
+    const blobServiceClient = getUploadBlobServiceClient();
     const containerClient = blobServiceClient.getContainerClient(containerName);
     const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
@@ -492,9 +599,21 @@ app.post("/upload", apiKeyAuth, upload.single("file"), async (req: Request, res:
     // multipart part), or fall back to octet-stream
     const contentType = file.mimetype || "application/octet-stream";
 
-    await blockBlobClient.uploadData(file.buffer, {
-      blobHTTPHeaders: { blobContentType: contentType },
-    });
+    // Stream the temp file to Azure Blob Storage.
+    // uploadStream handles chunking (4 MB blocks) and parallel transfers
+    // (5 concurrent) internally, avoiding loading the entire file into memory.
+    const fileStream = createReadStream(tempFilePath);
+    const uploadBufferSize = 4 * 1024 * 1024;  // 4 MB per block
+    const maxConcurrency = 5;
+
+    await blockBlobClient.uploadStream(
+      fileStream,
+      uploadBufferSize,
+      maxConcurrency,
+      {
+        blobHTTPHeaders: { blobContentType: contentType },
+      }
+    );
 
     if (metadata && Object.keys(metadata).length > 0) {
       await blockBlobClient.setMetadata(metadata);
@@ -505,7 +624,7 @@ app.post("/upload", apiKeyAuth, upload.single("file"), async (req: Request, res:
       blobName,
       containerName,
       contentType,
-      size: file.buffer.length,
+      size: file.size,
       metadataSet: metadata ? Object.keys(metadata).length : 0,
     });
   } catch (error: unknown) {
@@ -513,6 +632,11 @@ app.post("/upload", apiKeyAuth, upload.single("file"), async (req: Request, res:
     console.error("Upload error:", error);
     if (!res.headersSent) {
       res.status(500).json({ error: message });
+    }
+  } finally {
+    // Always clean up the temp file, whether the upload succeeded or failed.
+    if (tempFilePath) {
+      unlink(tempFilePath).catch(() => { /* best-effort cleanup */ });
     }
   }
 });
@@ -534,7 +658,7 @@ const httpServer = app.listen(PORT, () => {
   console.log(`   Max sessions : ${MAX_SESSIONS}`);
   console.log(`   SSE keepalive: ${SSE_KEEPALIVE_INTERVAL_MS / 1000}s`);
   console.log(`   JSON limit   : 50mb`);
-  console.log(`   Upload limit : 100mb\n`);
+  console.log(`   Upload limit : ${MAX_UPLOAD_SIZE_MB}mb (streaming via disk)\n`);
 });
 
 // ── Graceful shutdown ────────────────────────────────────────────────────────
