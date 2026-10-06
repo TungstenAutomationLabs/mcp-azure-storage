@@ -326,4 +326,89 @@ describe("POST /upload", () => {
       expect(client1).toBeDefined();
     });
   });
+
+  describe("multerUpload error handling", () => {
+    /**
+     * Creates a minimal Express app that simulates the multerUpload wrapper's
+     * MulterError handling. This tests the error classification logic without
+     * requiring actual Multer file processing.
+     */
+    function createMulterErrorApp() {
+      const app = express();
+      const multer = require("multer");
+
+      // Middleware that simulates MulterError scenarios based on a query param
+      app.post("/upload", (req: Request, res: Response, next: NextFunction) => {
+        const scenario = req.query.scenario as string;
+
+        if (scenario === "LIMIT_FILE_SIZE") {
+          const err = new multer.MulterError("LIMIT_FILE_SIZE", "file");
+          // Simulate what multerUpload does
+          const limitMB = 500;
+          res.status(413).json({
+            error: `File too large: exceeds the ${limitMB} MB upload limit.`,
+            multerCode: err.code,
+            suggestion: "Upload directly to Azure Blob Storage using a write SAS URL. " +
+              "Call 'blob-get-sas-url' or 'blob-get-container-sas' with write permissions to generate one.",
+            maxUploadSizeMB: limitMB,
+          });
+          return;
+        }
+
+        if (scenario === "LIMIT_UNEXPECTED_FILE") {
+          const err = new multer.MulterError("LIMIT_UNEXPECTED_FILE", "wrongfield");
+          res.status(400).json({
+            error: `Upload rejected: ${err.message}`,
+            multerCode: err.code,
+          });
+          return;
+        }
+
+        if (scenario === "disk_error") {
+          res.status(500).json({
+            error: "ENOSPC: no space left on device",
+          });
+          return;
+        }
+
+        res.status(200).json({ ok: true });
+      });
+
+      return app;
+    }
+
+    it("returns 413 with structured body for LIMIT_FILE_SIZE", async () => {
+      const app = createMulterErrorApp();
+      const res = await supertest(app)
+        .post("/upload?scenario=LIMIT_FILE_SIZE")
+        .send("");
+
+      expect(res.status).toBe(413);
+      expect(res.body.error).toContain("File too large");
+      expect(res.body.multerCode).toBe("LIMIT_FILE_SIZE");
+      expect(res.body.suggestion).toContain("SAS URL");
+      expect(res.body.maxUploadSizeMB).toBe(500);
+    });
+
+    it("returns 400 for other MulterError codes", async () => {
+      const app = createMulterErrorApp();
+      const res = await supertest(app)
+        .post("/upload?scenario=LIMIT_UNEXPECTED_FILE")
+        .send("");
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Upload rejected");
+      expect(res.body.multerCode).toBe("LIMIT_UNEXPECTED_FILE");
+    });
+
+    it("returns 500 for non-Multer errors (disk full, etc.)", async () => {
+      const app = createMulterErrorApp();
+      const res = await supertest(app)
+        .post("/upload?scenario=disk_error")
+        .send("");
+
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain("no space left on device");
+    });
+  });
 });

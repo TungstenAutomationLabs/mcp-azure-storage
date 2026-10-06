@@ -26,7 +26,7 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import multer from "multer";
+import multer, { MulterError } from "multer";
 import { createReadStream } from "fs";
 import { unlink } from "fs/promises";
 import { tmpdir } from "os";
@@ -489,6 +489,51 @@ const upload = multer({
 });
 
 /**
+ * Wraps Multer's upload.single() middleware so that MulterErrors
+ * (especially LIMIT_FILE_SIZE) are caught and returned as structured
+ * JSON with the correct HTTP status code (413 or 400) instead of
+ * falling through to Express's default 500 handler.
+ *
+ * Without this wrapper, Multer calls next(err) which bypasses the
+ * route handler's try/catch entirely.
+ */
+function multerUpload(req: Request, res: Response, next: NextFunction): void {
+  upload.single("file")(req, res, (err: unknown) => {
+    if (!err) return next();
+
+    // Clean up the temp file if Multer already wrote part of it
+    if (req.file?.path) {
+      unlink(req.file.path).catch(() => { /* best-effort */ });
+    }
+
+    if (err instanceof MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        const limitMB = MAX_UPLOAD_SIZE_MB;
+        res.status(413).json({
+          error: `File too large: exceeds the ${limitMB} MB upload limit.`,
+          multerCode: err.code,
+          suggestion: "Upload directly to Azure Blob Storage using a write SAS URL. " +
+            "Call 'blob-get-sas-url' or 'blob-get-container-sas' with write permissions to generate one.",
+          maxUploadSizeMB: limitMB,
+        });
+        return;
+      }
+      // Other Multer errors (LIMIT_UNEXPECTED_FILE, etc.)
+      res.status(400).json({
+        error: `Upload rejected: ${err.message}`,
+        multerCode: err.code,
+      });
+      return;
+    }
+
+    // Non-Multer error (disk full, stream error, etc.)
+    const message = err instanceof Error ? err.message : "Upload failed during file reception";
+    console.error("Multer error:", err);
+    res.status(500).json({ error: message });
+  });
+}
+
+/**
  * Content-Length pre-check middleware.
  *
  * If the Content-Length header indicates a file larger than the configured
@@ -553,7 +598,7 @@ function uploadSizeGuard(req: Request, res: Response, next: NextFunction): void 
   next();
 }
 
-app.post("/upload", apiKeyAuth, uploadSizeGuard, upload.single("file"), async (req: Request, res: Response) => {
+app.post("/upload", apiKeyAuth, uploadSizeGuard, multerUpload, async (req: Request, res: Response) => {
   let tempFilePath: string | undefined;
 
   try {
@@ -630,7 +675,15 @@ app.post("/upload", apiKeyAuth, uploadSizeGuard, upload.single("file"), async (r
     const message = error instanceof Error ? error.message : "Upload failed";
     console.error("Upload error:", error);
     if (!res.headersSent) {
-      res.status(500).json({ error: message });
+      // Distinguish Azure SDK size/timeout errors from other failures
+      const isTimeout = message.includes("timeout") || message.includes("ETIMEDOUT");
+      const status = isTimeout ? 504 : 500;
+      res.status(status).json({
+        error: message,
+        suggestion: status === 504
+          ? "The upload timed out. For large files, use a write SAS URL to upload directly to Azure Blob Storage."
+          : "Upload failed. Check server logs for details.",
+      });
     }
   } finally {
     // Always clean up the temp file, whether the upload succeeded or failed.
