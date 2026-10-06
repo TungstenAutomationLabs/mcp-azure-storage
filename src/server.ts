@@ -42,6 +42,7 @@ import {
 } from "@azure/storage-blob";
 import { apiKeyAuth } from "./middleware/api-key.js";
 import { getStorageConfig, getCredential, getSharedKeyCredential, hasSharedKey } from "./config.js";
+import { wrapToolErrorHandler } from "./utils/errors.js";
 import { registerBlobTools } from "./tools/blob-tools.js";
 import { registerTableTools } from "./tools/table-tools.js";
 import { registerQueueTools } from "./tools/queue-tools.js";
@@ -157,6 +158,13 @@ function createMcpServer(): McpServer {
     name: "azure-storage-mcp",
     version: "1.0.0",
   });
+
+  // ── Structured error wrapper ───────────────────────────────────────────
+  // Patches server.tool() so every handler is wrapped in try/catch.
+  // On error the wrapper converts the exception to a StructuredError JSON
+  // payload and re-throws, so the MCP SDK returns isError: true with the
+  // JSON string as the text content. Must be called before tool registration.
+  wrapToolErrorHandler(server);
 
   // ── Tools (35 total) — actions that read or mutate storage ──
   registerBlobTools(server);

@@ -75,6 +75,7 @@ mcp-azure-storage/
 │   │   ├── fileshare-tools.ts #  8 tools — share/directory/file operations
 │   │   └── utility-tools.ts   #  7 tools — base64, SAS refresh, MIME lookup, upload info
 │   └── utils/
+│       ├── errors.ts              # Structured error mapping + server.tool() wrapper
 │       └── format.ts              # Response formatting (JSON/HTML/MD) utility
 │   └── resources/
 │       ├── blob-resources.ts      #  4 resources — containers, blobs, properties
@@ -89,11 +90,12 @@ mcp-azure-storage/
 │   ├── middleware/
 │   │   └── api-key.test.ts    # API key auth tests (503/401/403/pass-through)
 │   ├── tools/
-│   │   ├── blob-tools.test.ts      # 15 tests — mock Azure Blob SDK + SSRF
-│   │   ├── queue-tools.test.ts     #  7 tests — mock Azure Queue SDK
-│   │   ├── table-tools.test.ts     #  7 tests — mock Azure Tables SDK
-│   │   ├── fileshare-tools.test.ts #  6 tests — mock Azure File Share SDK
-│   │   └── utility-tools.test.ts   # 10 tests — base64, MIME, container name, upload URL
+│   │   ├── blob-tools.test.ts           # 15 tests — mock Azure Blob SDK + SSRF
+│   │   ├── queue-tools.test.ts          #  7 tests — mock Azure Queue SDK
+│   │   ├── table-tools.test.ts          #  7 tests — mock Azure Tables SDK
+│   │   ├── fileshare-tools.test.ts      #  6 tests — mock Azure File Share SDK
+│   │   ├── utility-tools.test.ts        # 10 tests — base64, MIME, container name, upload URL
+│   │   └── structured-errors.test.ts    # 36 tests — error mapping, SAS sanitisation, MCP integration
 │   ├── resources/
 │   │   ├── blob-resources.test.ts      # 6 tests — list cap, download guard
 │   │   ├── queue-resources.test.ts     # 3 tests — list cap, properties
@@ -158,6 +160,99 @@ All 37 tools accept an optional `format` parameter that controls how structured 
 - `.mcp-detail` — `<dl>` for single-object key–value
 - `.mcp-nested` — `<pre>` for nested JSON inside a detail list
 - `.mcp-raw` — `<pre>` for primitives or non-object data
+
+---
+
+## Structured Error Model
+
+All 37 tools return **structured error JSON** when an operation fails. Instead of plain-text error messages, every error response uses `isError: true` with a single text content item containing a JSON object. This makes errors machine-parseable for automated retry logic, error routing, and client-side handling.
+
+### Error Response Shape
+
+When a tool call fails, the MCP response looks like:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "isError": true,
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"error\":{\"code\":\"not_found\",\"status\":404,\"azureCode\":\"BlobNotFound\",\"message\":\"BlobNotFound: The specified blob does not exist.\",\"retryable\":false}}"
+      }
+    ]
+  }
+}
+```
+
+Parse the `text` field as JSON to access the structured payload:
+
+```json
+{
+  "error": {
+    "code": "not_found",
+    "status": 404,
+    "azureCode": "BlobNotFound",
+    "message": "BlobNotFound: The specified blob does not exist.",
+    "retryable": false
+  }
+}
+```
+
+### Error Codes
+
+Every error includes a `code` field from this fixed set:
+
+| Code | HTTP Status | Description | Extra Fields |
+|------|-------------|-------------|--------------|
+| `not_found` | 404 | The requested resource (blob, container, queue, table, share) does not exist. | — |
+| `already_exists` | 409 | The resource already exists (container, queue, table, share). | — |
+| `lease_lost` | varies | A lease or pop receipt is invalid, missing, or mismatched. Retry after re-acquiring. | — |
+| `immutable` | 409 | The blob is protected by an immutability policy or legal hold. | `immutableUntil` (ISO 8601, when available) |
+| `archived` | 409 | The blob is in the Archive tier and must be rehydrated before access. | `archiveStatus` (e.g. `"rehydrate-pending-to-hot"`) |
+| `too_large` | — | The payload exceeds the maximum allowed size. | `maxBytes` |
+| `rate_limited` | 429 | Too many requests — back off and retry. | `retryAfterSeconds` |
+| `invalid` | 400 | A parameter or request value is invalid. | `field` (the invalid parameter name) |
+| `forbidden` | 403 | The request is not authorised for this operation. | — |
+| `backend` | 5xx / null | An unexpected server-side or network error. | `azureCode`, `status` |
+
+### Common Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `code` | `string` | Error category from the fixed set above. |
+| `status` | `number \| null` | HTTP status code from the Azure REST API, or `null` for non-HTTP errors. |
+| `azureCode` | `string?` | The Azure-specific error code (e.g. `"ContainerNotFound"`, `"PopReceiptMismatch"`). |
+| `message` | `string` | Human-readable message. Starts with the Azure code when known (e.g. `"BlobNotFound: ..."`). SAS signatures and sensitive parameters are automatically redacted. |
+| `retryable` | `boolean` | `true` for `rate_limited` and `backend` with 5xx status. `false` for all other codes. |
+
+### Handling Errors
+
+```typescript
+const response = await callTool("blob-read", { containerName: "docs", blobName: "missing.txt" });
+
+if (response.isError) {
+  const { error } = JSON.parse(response.content[0].text);
+
+  switch (error.code) {
+    case "not_found":
+      console.log(`Resource not found: ${error.message}`);
+      break;
+    case "rate_limited":
+      console.log(`Throttled — retry after ${error.retryAfterSeconds}s`);
+      break;
+    case "backend":
+      if (error.retryable) {
+        console.log("Transient failure — safe to retry");
+      }
+      break;
+    default:
+      console.log(`Error [${error.code}]: ${error.message}`);
+  }
+}
+```
 
 ---
 
@@ -937,7 +1032,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 
 ## Testing
 
-### Unit Tests (93 tests, no Azure required)
+### Unit Tests (156 tests, no Azure required)
 
 Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
 
@@ -997,7 +1092,8 @@ tests/
 │   ├── queue-tools.test.ts
 │   ├── table-tools.test.ts
 │   ├── fileshare-tools.test.ts
-│   └── utility-tools.test.ts
+│   ├── utility-tools.test.ts
+│   └── structured-errors.test.ts # Error mapping, SAS sanitisation, MCP integration
 ├── resources/                    # vi.hoisted + vi.mock for module-scope clients
 │   ├── blob-resources.test.ts
 │   ├── queue-resources.test.ts
