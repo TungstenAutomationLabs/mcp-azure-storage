@@ -973,9 +973,14 @@ azd down --purge
 | `CORS_ENABLED` | No | `true` | Enable CORS headers for browser-based clients (MCP Inspector, web chat). Set `false` in production if only non-browser clients connect. |
 | `SAS_EXPIRY_HOURS` | No | `24` | Default SAS token expiry (hours) |
 | `SAS_DEFAULT_PERMISSIONS` | No | `rl` | Default SAS permissions |
-| `RATE_LIMIT_WINDOW_MINUTES` | No | `15` | Rate limit window (minutes) |
-| `RATE_LIMIT_MAX_REQUESTS` | No | `300` | Max requests per window per IP |
+| `RATE_LIMIT_WINDOW_SECONDS` | No | `900` | Rate limit window in seconds (overrides `RATE_LIMIT_WINDOW_MINUTES` when set) |
+| `RATE_LIMIT_MCP_MAX` | No | `3000` | Max requests per window for `/mcp` (JSON-RPC) per identity |
+| `RATE_LIMIT_UPLOAD_MAX` | No | `600` | Max requests per window for `/upload` (multipart) per identity |
+| `RATE_LIMIT_WINDOW_MINUTES` | No | `15` | Legacy rate limit window (minutes). Used when `RATE_LIMIT_WINDOW_SECONDS` is unset |
+| `RATE_LIMIT_MAX_REQUESTS` | No | `300` | Legacy max requests per window. Used for both endpoints when specific `*_MAX` vars are unset |
+| `TRUST_PROXY_HOPS` | No | `1` | Number of trusted reverse proxy hops for X-Forwarded-For resolution. Set `2` if behind both a CDN and Container Apps |
 | `MAX_SESSIONS` | No | `100` | Maximum concurrent stateful MCP sessions (returns 503 when full) |
+| `SESSION_RETRY_AFTER_SECONDS` | No | `30` | Retry hint (seconds) returned in 503 session-capacity errors |
 | `SSE_KEEPALIVE_INTERVAL_MS` | No | `30000` | Interval (ms) between SSE keepalive heartbeats. Prevents Azure reverse proxy from killing idle SSE connections (~240s timeout). |
 
 > **Note:** The Azure deployment uses `minReplicas: 1` to keep at least one replica always running, ensuring consistent response times and no cold-start connection drops. The Container App auto-scales up to 5 replicas under load (HTTP concurrency threshold: 20 requests). If you want to reduce costs in a non-production environment, you can set `minReplicas: 0` in [`infra/main.bicep`](infra/main.bicep:342), but be aware that scale-to-zero causes 10–30 second cold starts that may time out HTTP clients like Postman.

@@ -15,8 +15,8 @@
  *
  * Security layers applied (in order):
  *  1. Helmet — sets security-related HTTP headers
- *  2. Rate limiter — per-IP request throttling on /mcp
- *  3. API key auth — validates X-API-Key or Bearer token
+ *  2. API key auth — validates X-API-Key or Bearer token
+ *  3. Rate limiter — per-identity request throttling (API-key hash or IP)
  *
  * @see {@link https://modelcontextprotocol.io/} MCP specification
  */
@@ -31,6 +31,7 @@ import { createReadStream } from "fs";
 import { unlink } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
+import crypto from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "crypto";
@@ -62,7 +63,10 @@ const app = express();
 //     (without this, all requests appear to come from the proxy IP)
 //  2. req.ip / req.protocol reflect the original client connection
 // Safe because Container Apps always terminates TLS and sets forwarded headers.
-app.set("trust proxy", true);
+// TRUST_PROXY_HOPS controls how many proxy hops to trust. Default 1 is correct
+// for a single reverse proxy (e.g. Azure Container Apps ingress). Set to 2 if
+// there is an additional proxy layer (e.g. Azure Front Door + Container Apps).
+app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS || 1));
 
 // CORS — required for browser-based MCP clients (MCP Inspector, web chat, etc.)
 // Enabled by default (dev-friendly). Set CORS_ENABLED=false in production if the
@@ -100,22 +104,113 @@ app.use(helmet());
 const SSE_KEEPALIVE_INTERVAL_MS = parseInt(process.env.SSE_KEEPALIVE_INTERVAL_MS || "30000", 10); // 30s default
 
 // ── Rate limiting ────────────────────────────────────────────────────────────
-// Per-IP sliding window. Configurable via env vars; defaults to 300 req / 15 min.
-const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MINUTES || "15", 10) * 60 * 1000;
-const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || "300", 10);
+// Separate budgets for /mcp (MCP JSON-RPC) and /upload (multipart REST).
+// New env vars override the legacy RATE_LIMIT_WINDOW_MINUTES / RATE_LIMIT_MAX_REQUESTS.
 
-const limiter = rateLimit({
-  windowMs: RATE_LIMIT_WINDOW_MS,
-  max: RATE_LIMIT_MAX,
-  standardHeaders: true,  // Return RateLimit-* headers (draft-6)
-  legacyHeaders: false,    // Disable X-RateLimit-* headers
-  message: {
-    jsonrpc: "2.0",
-    error: { code: -32005, message: "Too many requests, please try again later." },
+// Legacy fallback values (backward-compatible)
+const legacyWindowSeconds = parseInt(process.env.RATE_LIMIT_WINDOW_MINUTES || "15", 10) * 60;
+const legacyMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || "300", 10);
+
+// New-style env vars with defaults; fall back to legacy when unset
+const RATE_LIMIT_WINDOW_SECONDS = process.env.RATE_LIMIT_WINDOW_SECONDS
+  ? parseInt(process.env.RATE_LIMIT_WINDOW_SECONDS, 10)
+  : legacyWindowSeconds;
+const RATE_LIMIT_MCP_MAX = process.env.RATE_LIMIT_MCP_MAX
+  ? parseInt(process.env.RATE_LIMIT_MCP_MAX, 10)
+  : (process.env.RATE_LIMIT_MAX_REQUESTS ? legacyMax : 3000);
+const RATE_LIMIT_UPLOAD_MAX = process.env.RATE_LIMIT_UPLOAD_MAX
+  ? parseInt(process.env.RATE_LIMIT_UPLOAD_MAX, 10)
+  : (process.env.RATE_LIMIT_MAX_REQUESTS ? legacyMax : 600);
+
+// Session capacity retry hint (seconds)
+const SESSION_RETRY_AFTER_SECONDS = parseInt(process.env.SESSION_RETRY_AFTER_SECONDS || "30", 10);
+
+/**
+ * Derive a rate-limit identity key from the request.
+ *
+ * - If the request carries an API key (X-API-Key or Bearer) and it matches
+ *   the configured MCP_API_KEY, key on SHA-256(apiKey) so each legitimate
+ *   key holder gets their own budget.
+ * - If MCP_API_KEY is not configured (auth disabled), any presented API key
+ *   is hashed so different keys still get separate budgets.
+ * - Otherwise, key on the resolved client IP (respects trust proxy hops).
+ *
+ * @returns `{ key, isApiKey }` — key is the limiter identity string,
+ *          isApiKey is true when the key derives from a valid API key.
+ */
+export function getRateLimitKey(req: Request): { key: string; isApiKey: boolean } {
+  const providedKey =
+    (req.headers["x-api-key"] as string | undefined) ||
+    extractBearerTokenForRateLimit(req.headers.authorization);
+
+  if (providedKey) {
+    const configuredKey = process.env.MCP_API_KEY;
+    // If auth is disabled (no MCP_API_KEY) or the key matches, key on the hash
+    if (!configuredKey || timingSafeEqualForRateLimit(configuredKey, providedKey)) {
+      const hash = crypto.createHash("sha256").update(providedKey).digest("hex");
+      return { key: `apikey:${hash}`, isApiKey: true };
+    }
+  }
+
+  // Fallback: key on client IP
+  return { key: `ip:${req.ip || "unknown"}`, isApiKey: false };
+}
+
+/** Extract Bearer token from Authorization header (rate-limit helper). */
+function extractBearerTokenForRateLimit(authHeader: string | undefined): string | undefined {
+  if (!authHeader) return undefined;
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1] : undefined;
+}
+
+/** Constant-time string comparison (rate-limit helper, mirrors api-key.ts). */
+function timingSafeEqualForRateLimit(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    crypto.timingSafeEqual(Buffer.from(a), Buffer.from(a));
+    return false;
+  }
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
+// ── MCP rate limiter (/mcp JSON-RPC) ─────────────────────────────────────────
+const mcpLimiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_SECONDS * 1000,
+  max: RATE_LIMIT_MCP_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => getRateLimitKey(req).key,
+  handler: (req: Request, res: Response) => {
+    const retryAfterSeconds = RATE_LIMIT_WINDOW_SECONDS;
+    res.set("Retry-After", String(retryAfterSeconds));
+    res.status(429).json({
+      jsonrpc: "2.0",
+      id: req.body?.id ?? null,
+      error: {
+        code: -32005,
+        message: "Too many requests, please try again later.",
+        data: { reason: "rate_limited", retryAfterSeconds },
+      },
+    });
   },
 });
-app.use("/mcp", limiter);
-app.use("/upload", limiter);
+
+// ── Upload rate limiter (/upload REST) ───────────────────────────────────────
+const uploadLimiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_SECONDS * 1000,
+  max: RATE_LIMIT_UPLOAD_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => getRateLimitKey(req).key,
+  handler: (_req: Request, res: Response) => {
+    const retryAfterSeconds = RATE_LIMIT_WINDOW_SECONDS;
+    res.set("Retry-After", String(retryAfterSeconds));
+    res.status(429).json({
+      error: "Too many requests, please try again later.",
+      code: "rate_limited",
+      retryAfterSeconds,
+    });
+  },
+});
 
 // Accept large JSON payloads (base64-encoded files can be tens of MB).
 // Files beyond this limit should use the multipart /upload endpoint instead.
@@ -221,7 +316,10 @@ const sessionCleanupTimer = setInterval(() => {
 
 // ── API key auth on /mcp ─────────────────────────────────────────────────────
 // All /mcp routes require a valid API key. See middleware/api-key.ts.
+// Auth runs BEFORE rate limiting so that valid keys are recognized for
+// per-key rate-limit keying (SHA-256 of API key instead of IP).
 app.use("/mcp", apiKeyAuth);
+app.use("/mcp", mcpLimiter);
 
 // ══════════════════════════════════════════════════════════════════════════════
 // POST /mcp — Main MCP request handler
@@ -282,6 +380,7 @@ app.post("/mcp", async (req: Request, res: Response) => {
         error: {
           code: -32005,
           message: `Server at session capacity (${MAX_SESSIONS}). Try again later.`,
+          data: { reason: "session_capacity", retryAfterSeconds: SESSION_RETRY_AFTER_SECONDS },
         },
       });
       return;
@@ -627,7 +726,7 @@ function uploadSizeGuard(req: Request, res: Response, next: NextFunction): void 
   next();
 }
 
-app.post("/upload", apiKeyAuth, uploadSizeGuard, multerUpload, async (req: Request, res: Response) => {
+app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, multerUpload, async (req: Request, res: Response) => {
   let tempFilePath: string | undefined;
 
   try {
@@ -734,7 +833,7 @@ const httpServer = app.listen(PORT, () => {
     `   API key auth : ${process.env.MCP_API_KEY ? "✅ ENABLED" : "⚠️  DISABLED (set MCP_API_KEY)"}`
   );
   console.log(`   CORS         : ${CORS_ENABLED ? "✅ ENABLED" : "❌ DISABLED"}`);
-  console.log(`   Rate limit   : ${RATE_LIMIT_MAX} req / ${RATE_LIMIT_WINDOW_MS / 60000} min per IP`);
+  console.log(`   Rate limit   : MCP ${RATE_LIMIT_MCP_MAX} / Upload ${RATE_LIMIT_UPLOAD_MAX} per ${RATE_LIMIT_WINDOW_SECONDS}s (API-key-aware)`);
   console.log(`   Session TTL  : ${SESSION_TTL_MS / 60000} minutes`);
   console.log(`   Max sessions : ${MAX_SESSIONS}`);
   console.log(`   SSE keepalive: ${SSE_KEEPALIVE_INTERVAL_MS / 1000}s`);
