@@ -429,6 +429,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'MAX_JSON_BODY_BYTES'
               value: '52428800'
             }
+            {
+              // Maximum visibility timeout (lease duration) in seconds for
+              // queue-update-message and queue-renew-lease. Default: 3600 (1h).
+              name: 'MAX_QUEUE_VISIBILITY_SECONDS'
+              value: '3600'
+            }
           ]
         }
       ]

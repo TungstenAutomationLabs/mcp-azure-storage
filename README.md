@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **37 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **39 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed identity, and Bicep infrastructure-as-code.
 
@@ -8,7 +8,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
 
 ## Features
 
-- **37 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **39 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
 - **12 MCP resources** — read-only, URI-addressable data for LLM context (listings, content reads, properties)
 - **Direct file upload** — `POST /upload` endpoint for multipart form-data (bypasses base64/JSON-RPC for large files)
 - **URL-based upload** — `blob-upload-from-url` tool fetches files server-side (no base64 through LLM context)
@@ -42,9 +42,9 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
                                       └──────────┬───────────────┘
                                                   │
                       ┌───────────────────────────┬┴──────────────────────────┐
-                      │      35 Tools (actions)   │    12 Resources (reads)   │
+                      │      37 Tools (actions)   │    12 Resources (reads)   │
                       ├───────────────────────────┼───────────────────────────┤
-                      │ Blob (10) │ Queue (6)     │ Blob (4)  │ Queue (2)    │
+                      │ Blob (10) │ Queue (8)     │ Blob (4)  │ Queue (2)    │
                       │ Table (5) │ FileShare (8) │ Table (2) │ FileShare (4)│
                       │ Utility (6)               │                          │
                       └───────────┬───────────────┴──────────┬───────────────┘
@@ -70,7 +70,7 @@ mcp-azure-storage/
 │   │   └── api-key.ts         # API key auth (X-API-Key / Bearer)
 │   ├── tools/
 │   │   ├── blob-tools.ts      # 11 tools — container + blob CRUD, SAS, metadata, URL upload
-│   │   ├── queue-tools.ts     #  6 tools — queue CRUD + message operations
+│   │   ├── queue-tools.ts     #  8 tools — queue CRUD + message operations + lease renewal
 │   │   ├── table-tools.ts     #  5 tools — table CRUD + entity operations
 │   │   ├── fileshare-tools.ts #  8 tools — share/directory/file operations
 │   │   └── utility-tools.ts   #  7 tools — base64, SAS refresh, MIME lookup, upload info
@@ -91,7 +91,7 @@ mcp-azure-storage/
 │   │   └── api-key.test.ts    # API key auth tests (503/401/403/pass-through)
 │   ├── tools/
 │   │   ├── blob-tools.test.ts           # 15 tests — mock Azure Blob SDK + SSRF
-│   │   ├── queue-tools.test.ts          #  7 tests — mock Azure Queue SDK
+│   │   ├── queue-tools.test.ts          # 27 tests — mock Azure Queue SDK + lease renewal
 │   │   ├── table-tools.test.ts          #  7 tests — mock Azure Tables SDK
 │   │   ├── fileshare-tools.test.ts      #  6 tests — mock Azure File Share SDK
 │   │   ├── utility-tools.test.ts        # 10 tests — base64, MIME, container name, upload URL
@@ -133,7 +133,7 @@ mcp-azure-storage/
 
 ## Response Format Option
 
-All 37 tools accept an optional `format` parameter that controls how structured data is returned:
+All 39 tools accept an optional `format` parameter that controls how structured data is returned:
 
 | Value | Description |
 |-------|-------------|
@@ -165,7 +165,7 @@ All 37 tools accept an optional `format` parameter that controls how structured 
 
 ## Structured Error Model
 
-All 37 tools return **structured error JSON** when an operation fails. Instead of plain-text error messages, every error response uses `isError: true` with a single text content item containing a JSON object. This makes errors machine-parseable for automated retry logic, error routing, and client-side handling.
+All 39 tools return **structured error JSON** when an operation fails. Instead of plain-text error messages, every error response uses `isError: true` with a single text content item containing a JSON object. This makes errors machine-parseable for automated retry logic, error routing, and client-side handling.
 
 ### Error Response Shape
 
@@ -274,7 +274,7 @@ if (response.isError) {
 | `blob-get-sas-url` | Generate a time-limited SAS URL for a specific blob. Use to grant temporary access without exposing account keys. |
 | `blob-get-container-sas` | Generate a time-limited SAS token for an entire container. Returns both the token and a ready-to-use connection string. |
 
-### Queue Storage (6 tools)
+### Queue Storage (8 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -284,6 +284,8 @@ if (response.isError) {
 | `queue-peek-messages` | Preview messages at the front of a queue WITHOUT removing them. Messages stay visible to other receivers. |
 | `queue-receive-messages` | Receive and hide messages for processing. Call `queue-delete-message` after processing to permanently remove each message. |
 | `queue-delete-message` | Permanently remove a processed message. Requires `messageId` + `popReceipt` from `queue-receive-messages`. |
+| `queue-update-message` | Update a JSON message body with additive fields (state, progress, attempt, owner, details) and optionally renew the lease. Requires `messageId` + `popReceipt`. Message body must be a JSON object (max 64 KiB). |
+| `queue-renew-lease` | Renew a message's visibility timeout (lease) without changing the body. Pass `messageText` from the receive response to preserve the body content. Requires `messageId` + `popReceipt`. |
 
 ### Table Storage (5 tools)
 
@@ -986,6 +988,7 @@ azd down --purge
 | `SSE_KEEPALIVE_INTERVAL_MS` | No | `30000` | Interval (ms) between SSE keepalive heartbeats. Prevents Azure reverse proxy from killing idle SSE connections (~240s timeout). |
 | `MAX_UPLOAD_BYTES` | No | `5368709120` | Hard byte limit for streaming multipart uploads via `/upload`. Default: 5 GiB. Files exceeding this are rejected with HTTP 413 (`code: "too_large"`). |
 | `MAX_JSON_BODY_BYTES` | No | `52428800` | Hard byte limit for JSON request bodies on `/mcp`. Default: 50 MiB. Controls `express.json({ limit })`. Oversized JSON bodies return HTTP 413. |
+| `MAX_QUEUE_VISIBILITY_SECONDS` | No | `3600` | Maximum allowed visibility timeout (lease duration) for `queue-update-message` and `queue-renew-lease`. Default: 3600 (1 hour). Azure Queue Storage supports up to 7 days, but this server-side cap prevents accidentally setting very long leases. |
 
 > **Note:** The Azure deployment uses `minReplicas: 1` to keep at least one replica always running, ensuring consistent response times and no cold-start connection drops. The Container App auto-scales up to 5 replicas under load (HTTP concurrency threshold: 20 requests). If you want to reduce costs in a non-production environment, you can set `minReplicas: 0` in [`infra/main.bicep`](infra/main.bicep:342), but be aware that scale-to-zero causes 10–30 second cold starts that may time out HTTP clients like Postman.
 
@@ -1041,7 +1044,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 
 ## Testing
 
-### Unit Tests (156 tests, no Azure required)
+### Unit Tests (176 tests, no Azure required)
 
 Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
 
@@ -1056,7 +1059,7 @@ npm run test:watch
 npm run test:coverage
 ```
 
-**Test coverage:** Config, API key middleware, all 37 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
+**Test coverage:** Config, API key middleware, all 39 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
 
 ### Integration Tests (Azurite)
 

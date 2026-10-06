@@ -1,8 +1,8 @@
 /**
- * Azure Queue Storage MCP tools — 6 tools.
+ * Azure Queue Storage MCP tools — 8 tools.
  *
  * Provides queue management (create, delete) and message operations
- * (send, peek, receive, delete).
+ * (send, peek, receive, delete, update, renew-lease).
  *
  * Note: Queue listing and queue properties are provided by the
  * `azure-queue:///queues` and `azure-queue:///queues/{queueName}/properties`
@@ -14,6 +14,10 @@
  *  3. `queue-delete-message` permanently removes processed messages.
  *  4. If delete is not called within the visibility timeout, the message
  *     reappears in the queue for retry (at-least-once delivery).
+ *
+ * For long-running tasks, use `queue-update-message` to patch progress
+ * fields and optionally renew the lease, or `queue-renew-lease` to extend
+ * the visibility timeout without mutating the message body.
  *
  * @module tools/queue-tools
  */
@@ -27,8 +31,45 @@ import {
 } from "@azure/storage-queue";
 import { getStorageConfig } from "../config.js";
 
+/** Azure Queue message body limit: 64 KiB. */
+const MAX_MESSAGE_BYTES = 65_536;
+
 /**
- * Register all 6 Queue Storage tools on the given MCP server.
+ * Maximum visibility timeout in seconds.
+ * Configurable via MAX_QUEUE_VISIBILITY_SECONDS env var (default: 3600 = 1 hour).
+ */
+function getMaxVisibilitySeconds(): number {
+  const raw = process.env.MAX_QUEUE_VISIBILITY_SECONDS;
+  if (raw) {
+    const parsed = parseInt(raw, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 3600;
+}
+
+/**
+ * Create an InvalidArgumentError that flows through the structured error mapper.
+ */
+function invalidArgError(message: string, field?: string): Error {
+  const err = new Error(message) as Error & { name: string; code: string; field?: string };
+  err.name = "InvalidArgumentError";
+  err.code = "ERR_INVALID_ARG";
+  if (field) err.field = field;
+  return err;
+}
+
+/**
+ * Create a TooLargeError that flows through the structured error mapper.
+ */
+function tooLargeError(message: string, maxBytes: number): Error {
+  const err = new Error(message) as Error & { name: string; maxBytes: number };
+  err.name = "TooLargeError";
+  err.maxBytes = maxBytes;
+  return err;
+}
+
+/**
+ * Register all 8 Queue Storage tools on the given MCP server.
  *
  * Creates a singleton QueueServiceClient that reuses the internal HTTP
  * connection pool across all tool invocations.
@@ -169,6 +210,186 @@ export function registerQueueTools(server: McpServer): void {
       const queueClient = client.getQueueClient(queueName);
       await queueClient.deleteMessage(messageId, popReceipt);
       return formatResponse({ success: true, deletedMessageId: messageId }, format, "Message Deleted");
+    }
+  );
+
+  // ── LEASE RENEWAL & MESSAGE UPDATE ─────────────────────────────────────
+
+  server.tool(
+    "queue-update-message",
+    "Update an existing queue message body with additive fields and optionally renew the message lease (visibility timeout). The message body must be a JSON object — non-JSON messages cannot be patched. Fields are merged additively (existing fields are preserved). Pass the current messageText from queue-receive-messages so existing fields are preserved during the merge. Returns the updated body and new popReceipt.",
+    {
+      queueName: z.string().describe("Name of the queue containing the message"),
+      messageId: z.string().describe("Message ID from queue-receive-messages"),
+      popReceipt: z.string().describe("Pop receipt from queue-receive-messages or a previous update"),
+      messageText: z.string().optional()
+        .describe("Current message body text (from queue-receive-messages). Required to preserve existing fields during additive merge. Must be a JSON object string."),
+      patch: z.object({
+        state: z.enum(["queued", "running", "completed", "failed", "abandoned"]).optional()
+          .describe("Work item state"),
+        progress: z.number().optional()
+          .describe("Progress percentage (0–100 inclusive, integer)"),
+        attempt: z.number().optional()
+          .describe("Attempt count (non-negative integer)"),
+        owner: z.string().optional()
+          .describe("Agent or worker ID that owns this work item"),
+        details: z.record(z.string(), z.string()).optional()
+          .describe("Additional metadata as string key-value pairs (merged shallowly into existing details)"),
+      }).optional().describe("Fields to merge into the message body (additive — does not remove existing fields)"),
+      leaseSeconds: z.number().optional()
+        .describe("Renew the message lease (visibility timeout) to this many seconds from now. Must be > 0 and <= MAX_QUEUE_VISIBILITY_SECONDS (default 3600)."),
+      format: formatSchema,
+    },
+    async ({ queueName, messageId, popReceipt, messageText, patch, leaseSeconds, format }) => {
+      const maxVis = getMaxVisibilitySeconds();
+
+      // ── Validate leaseSeconds ──────────────────────────────────────────
+      if (leaseSeconds !== undefined) {
+        if (!Number.isInteger(leaseSeconds) || leaseSeconds <= 0 || leaseSeconds > maxVis) {
+          throw invalidArgError(
+            `leaseSeconds must be an integer between 1 and ${maxVis}`,
+            "leaseSeconds"
+          );
+        }
+      }
+
+      // ── Validate patch fields ──────────────────────────────────────────
+      if (patch) {
+        if (patch.progress !== undefined) {
+          if (!Number.isInteger(patch.progress) || patch.progress < 0 || patch.progress > 100) {
+            throw invalidArgError(
+              "progress must be an integer between 0 and 100",
+              "progress"
+            );
+          }
+        }
+        if (patch.attempt !== undefined) {
+          if (!Number.isInteger(patch.attempt) || patch.attempt < 0) {
+            throw invalidArgError(
+              "attempt must be a non-negative integer",
+              "attempt"
+            );
+          }
+        }
+      }
+
+      // ── Parse existing body ────────────────────────────────────────────
+      let body: Record<string, unknown> = {};
+      if (messageText !== undefined) {
+        try {
+          const parsed = JSON.parse(messageText);
+          if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw invalidArgError(
+              "messageText must be a JSON object (not array, null, or primitive)",
+              "messageText"
+            );
+          }
+          body = parsed;
+        } catch (e) {
+          if (e instanceof SyntaxError) {
+            throw invalidArgError(
+              "messageText is not valid JSON — only JSON object messages can be patched",
+              "messageText"
+            );
+          }
+          throw e; // re-throw our own invalidArgError
+        }
+      }
+
+      // ── Apply additive patch ───────────────────────────────────────────
+      if (patch) {
+        if (patch.state !== undefined) body.state = patch.state;
+        if (patch.progress !== undefined) body.progress = patch.progress;
+        if (patch.attempt !== undefined) body.attempt = patch.attempt;
+        if (patch.owner !== undefined) body.owner = patch.owner;
+        if (patch.details !== undefined) {
+          const existing = (typeof body.details === "object" && body.details !== null && !Array.isArray(body.details))
+            ? body.details as Record<string, string>
+            : {};
+          body.details = { ...existing, ...patch.details };
+        }
+      }
+
+      // Server-managed timestamp
+      body.updatedAt = new Date().toISOString();
+
+      const bodyString = JSON.stringify(body);
+
+      // ── Enforce 64 KiB body limit ──────────────────────────────────────
+      const bodyBytes = Buffer.byteLength(bodyString, "utf-8");
+      if (bodyBytes > MAX_MESSAGE_BYTES) {
+        throw tooLargeError(
+          `Updated message body (${bodyBytes} bytes) exceeds the 64 KiB Azure Queue limit`,
+          MAX_MESSAGE_BYTES
+        );
+      }
+
+      // ── Call Azure updateMessage ───────────────────────────────────────
+      const queueClient = queueServiceClient.getQueueClient(queueName);
+      const visibilityTimeout = leaseSeconds ?? 0;
+      const result = await queueClient.updateMessage(
+        messageId,
+        popReceipt,
+        bodyString,
+        visibilityTimeout
+      );
+
+      const response: Record<string, unknown> = {
+        ok: true,
+        messageId,
+        popReceipt: result.popReceipt,
+        body,
+      };
+      if (leaseSeconds !== undefined) {
+        response.visibilityTimeout = leaseSeconds;
+      }
+
+      return formatResponse(response, format, "Message Updated");
+    }
+  );
+
+  server.tool(
+    "queue-renew-lease",
+    "Renew an existing message lease (visibility timeout) without modifying the message body. Pass the current messageText from queue-receive-messages to preserve the body content. Returns the new popReceipt (use it for subsequent operations on this message).",
+    {
+      queueName: z.string().describe("Name of the queue containing the message"),
+      messageId: z.string().describe("Message ID from queue-receive-messages"),
+      popReceipt: z.string().describe("Pop receipt from queue-receive-messages or a previous update/renewal"),
+      leaseSeconds: z.number().describe("New visibility timeout in seconds (must be > 0 and <= MAX_QUEUE_VISIBILITY_SECONDS, default max 3600)"),
+      messageText: z.string().optional()
+        .describe("Current message body text (from queue-receive-messages). Pass this to preserve the message body during renewal."),
+      format: formatSchema,
+    },
+    async ({ queueName, messageId, popReceipt, leaseSeconds, messageText, format }) => {
+      const maxVis = getMaxVisibilitySeconds();
+
+      // ── Validate leaseSeconds ──────────────────────────────────────────
+      if (!Number.isInteger(leaseSeconds) || leaseSeconds <= 0 || leaseSeconds > maxVis) {
+        throw invalidArgError(
+          `leaseSeconds must be an integer between 1 and ${maxVis}`,
+          "leaseSeconds"
+        );
+      }
+
+      const queueClient = queueServiceClient.getQueueClient(queueName);
+
+      // Azure updateMessage replaces the body — pass the original text to
+      // preserve it, or empty string if not provided.
+      const bodyText = messageText ?? "";
+
+      const result = await queueClient.updateMessage(
+        messageId,
+        popReceipt,
+        bodyText,
+        leaseSeconds
+      );
+
+      return formatResponse({
+        ok: true,
+        messageId,
+        popReceipt: result.popReceipt,
+        leaseSeconds,
+      }, format, "Lease Renewed");
     }
   );
 
