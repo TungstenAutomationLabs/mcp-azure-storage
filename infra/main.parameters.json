@@ -16,6 +16,9 @@
     },
     "existingStorageAccountKey": {
       "value": "${AZURE_STORAGE_ACCOUNT_KEY}"
+    },
+    "enableLifecyclePolicy": {
+      "value": "${ENABLE_LIFECYCLE_POLICY=false}"
     }
   }
 }

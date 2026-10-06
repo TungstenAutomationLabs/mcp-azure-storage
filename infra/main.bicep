@@ -57,6 +57,15 @@ param existingStorageAccountName string = ''
 @secure()
 param existingStorageAccountKey string = ''
 
+// ── Storage Lifecycle Policy (opt-in) ────────────────────────
+// When true, provisions lifecycle management rules that automatically move
+// blobs to cheaper access tiers based on age:
+//   - All block blobs → Cool tier after 30 days
+//   - Blobs under backups/ or archives/ → Archive tier after 90 days
+// Only applies to new storage accounts (ignored when using BYOSA).
+// Enable via the deploy script: .\deploy_to_azure.ps1 -EnableLifecyclePolicy
+param enableLifecyclePolicy bool = false
+
 // Computed flag: true when the user is bringing their own storage account.
 var useExistingStorage = !empty(existingStorageAccountName) && !empty(existingStorageAccountKey)
 
@@ -233,7 +242,7 @@ resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
 // Only applies to new storage accounts. BYOSA customers manage their own
 // lifecycle policies. These thresholds are sensible defaults; adjust by
 // editing the daysAfterModificationGreaterThan values below.
-resource lifecyclePolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = if (!useExistingStorage) {
+resource lifecyclePolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = if (enableLifecyclePolicy && !useExistingStorage) {
   parent: storageAccount
   name: 'default'
   properties: {

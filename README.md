@@ -642,14 +642,39 @@ The [`deploy_to_azure.ps1`](deploy_to_azure.ps1) script automates the entire dep
 
 # Use a different env file
 .\deploy_to_azure.ps1 -EnvFile ".env.production"
+
+# Enable storage lifecycle policy (auto-tiering to Cool/Archive)
+.\deploy_to_azure.ps1 -EnableLifecyclePolicy
 ```
+
+| Flag | Description |
+|------|-------------|
+| `-EnvFile <path>` | Path to the `.env` file. Defaults to `.env` in the script directory. |
+| `-SkipProvision` | Runs `azd deploy` instead of `azd up` (skips Bicep provisioning). Use when only code has changed. |
+| `-EnableLifecyclePolicy` | Provisions Azure Storage lifecycle management rules on new storage accounts (see below). |
 
 **What the script does:**
 1. Parses your `.env` file for uncommented `KEY=VALUE` lines
 2. Syncs `AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_STORAGE_ACCOUNT_KEY`, and `MCP_API_KEY` into the active azd environment
-3. Shows a deployment summary with confirmation prompt
-4. Runs `azd up` (or `azd deploy` with `-SkipProvision`)
-5. Displays the MCP endpoint URL on success
+3. Sets optional infrastructure flags (e.g. lifecycle policy)
+4. Shows a deployment summary with confirmation prompt
+5. Runs `azd up` (or `azd deploy` with `-SkipProvision`)
+6. Displays the MCP endpoint URL on success
+
+#### Storage Lifecycle Policy
+
+The `-EnableLifecyclePolicy` flag provisions automatic blob tiering rules that reduce storage costs without any application changes:
+
+| Rule | Scope | Action |
+|------|-------|--------|
+| `cool-after-30-days` | All block blobs | Move to **Cool** tier after 30 days of no modification |
+| `archive-after-90-days` | Blobs under `backups/` or `archives/` prefixes | Move to **Archive** tier after 90 days of no modification |
+
+**Notes:**
+- **Off by default** — the flag must be explicitly passed to enable lifecycle rules
+- **Only applies to new storage accounts** provisioned by Bicep — has no effect when using BYOSA (bring-your-own storage account)
+- To disable after enabling, run a deploy without the flag; the next `azd provision` will remove the lifecycle policy
+- Thresholds (30/90 days) can be customised by editing [`infra/main.bicep`](infra/main.bicep)
 
 > **Prerequisites:** You must have run `az login`, `azd auth login`, and `azd init` at least once before using the script. See the manual steps below if this is your first deployment.
 
@@ -906,7 +931,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 | `azd:test` | `npm run azd:test` | Provision + deploy to test environment |
 | `azd:test:provision` | `npm run azd:test:provision` | Provision test infrastructure only |
 | `azd:test:deploy` | `npm run azd:test:deploy` | Deploy app to test only (skip provision) |
-| — | `.\deploy_to_azure.ps1` | Reads `.env`, syncs vars to azd env, runs `azd up` (add `-SkipProvision` for code-only deploy) |
+| — | `.\deploy_to_azure.ps1` | Reads `.env`, syncs vars to azd env, runs `azd up` (add `-SkipProvision` for code-only deploy, `-EnableLifecyclePolicy` for auto-tiering) |
 
 ---
 

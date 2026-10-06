@@ -7,7 +7,8 @@
       1. Parses the .env file in the project root (skipping comments and blank lines)
       2. Syncs key variables (AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_ACCOUNT_KEY,
          MCP_API_KEY) into the active azd environment using `azd env set`
-      3. Runs `azd up` to provision infrastructure and deploy the container
+      3. Optionally enables infrastructure features (e.g. lifecycle policy)
+      4. Runs `azd up` to provision infrastructure and deploy the container
 
     This means you only need to maintain ONE .env file for both local dev and
     Azure deployment. No need to remember separate `azd env set` commands.
@@ -18,6 +19,13 @@
 .PARAMETER SkipProvision
     If set, runs `azd deploy` instead of `azd up` (skips infrastructure provisioning).
     Use this when you've only changed code, not infrastructure or env vars.
+
+.PARAMETER EnableLifecyclePolicy
+    If set, provisions Azure Storage lifecycle management rules on new storage
+    accounts. These rules automatically move blobs to cheaper access tiers:
+      - All block blobs → Cool tier after 30 days
+      - Blobs under backups/ or archives/ → Archive tier after 90 days
+    Off by default. Has no effect when using BYOSA (bring-your-own storage).
 
 .EXAMPLE
     .\deploy_to_azure.ps1
@@ -30,12 +38,17 @@
 .EXAMPLE
     .\deploy_to_azure.ps1 -EnvFile ".env.production"
     # Use a different env file
+
+.EXAMPLE
+    .\deploy_to_azure.ps1 -EnableLifecyclePolicy
+    # Provision with storage lifecycle policy (auto-tiering)
 #>
 
 [CmdletBinding()]
 param(
     [string]$EnvFile = "",
-    [switch]$SkipProvision
+    [switch]$SkipProvision,
+    [switch]$EnableLifecyclePolicy
 )
 
 # Resolve EnvFile default — $PSScriptRoot can be empty when invoked via -File
@@ -120,6 +133,15 @@ foreach ($key in $syncKeys) {
     }
 }
 
+# -- 4b. Set optional infrastructure flags --
+if ($EnableLifecyclePolicy) {
+    azd env set ENABLE_LIFECYCLE_POLICY "true" 2>$null
+    Write-Ok "ENABLE_LIFECYCLE_POLICY = true (auto-tier blobs to Cool/Archive)"
+} else {
+    azd env set ENABLE_LIFECYCLE_POLICY "false" 2>$null
+    Write-Skip "Lifecycle policy disabled (pass -EnableLifecyclePolicy to enable)"
+}
+
 # -- 5. Show summary before deploying --
 Write-Step "Deployment summary"
 Write-Host "  Environment:     $($currentEnv.Name)" -ForegroundColor White
@@ -132,6 +154,11 @@ if ($SkipProvision) {
     Write-Host "  Mode:            Deploy only (azd deploy)" -ForegroundColor White
 } else {
     Write-Host "  Mode:            Full provision + deploy (azd up)" -ForegroundColor White
+}
+if ($EnableLifecyclePolicy) {
+    Write-Host "  Lifecycle Policy: ENABLED (Cool after 30d, Archive after 90d)" -ForegroundColor White
+} else {
+    Write-Host "  Lifecycle Policy: Disabled (pass -EnableLifecyclePolicy to enable)" -ForegroundColor DarkGray
 }
 
 # -- 6. Confirm --
