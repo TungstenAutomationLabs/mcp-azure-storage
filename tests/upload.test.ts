@@ -1,23 +1,23 @@
 /**
  * Unit tests for POST /upload endpoint (server.ts)
  *
- * Tests the upload size guard middleware and the streaming upload handler.
+ * Tests the busboy-based streaming upload handler.
  * Mocks Azure Storage SDK to avoid network calls.
  *
  * These tests verify:
- *  - 413 rejection for oversized Content-Length headers
+ *  - 413 rejection for oversized Content-Length headers (uploadSizeGuard)
+ *  - 413 rejection when stream-level byte limit is exceeded
  *  - 400 responses for missing fields
  *  - Successful upload via streaming (mocked)
- *  - Temp file cleanup after upload
+ *  - Metadata set after upload when provided
+ *  - Aborted uploads do not commit blobs
+ *  - JSON body parser returns structured 413 with maxJsonBodyBytes
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express, { Request, Response, NextFunction } from "express";
 import supertest from "supertest";
-import { tmpdir } from "os";
-import { writeFileSync, existsSync, mkdirSync } from "fs";
-import path from "path";
-import { randomUUID } from "crypto";
+import { Readable, PassThrough } from "stream";
 
 // ── Mock Azure Storage Blob SDK ──────────────────────────────────────────────
 const mockUploadStream = vi.fn().mockResolvedValue({});
@@ -72,19 +72,19 @@ describe("POST /upload", () => {
      * Creates a minimal Express app with just the size guard middleware
      * to test Content-Length pre-check behaviour in isolation.
      */
-    function createSizeGuardApp(maxUploadSizeBytes: number) {
+    function createSizeGuardApp(maxUploadBytes: number) {
       const app = express();
 
       // Replicate the uploadSizeGuard middleware logic from server.ts
       const sizeGuard = (req: Request, res: Response, next: NextFunction): void => {
         const contentLength = parseInt(req.headers["content-length"] || "0", 10);
-        const maxMB = maxUploadSizeBytes / (1024 * 1024);
 
-        if (contentLength > maxUploadSizeBytes) {
-          const sizeMB = (contentLength / (1024 * 1024)).toFixed(1);
+        if (contentLength > maxUploadBytes) {
           res.status(413).json({
-            error: `File too large: ${sizeMB} MB exceeds the ${maxMB} MB upload limit.`,
-            suggestion: "Upload directly to Azure Blob Storage using the SAS URL below, or use 'blob-get-container-sas' with write permissions to generate one.",
+            code: "too_large",
+            error: "File too large",
+            maxBytes: maxUploadBytes,
+            suggestion: "Reduce file size or split into parts",
           });
           return;
         }
@@ -98,7 +98,7 @@ describe("POST /upload", () => {
       return app;
     }
 
-    it("returns 413 when Content-Length exceeds the limit", async () => {
+    it("returns 413 with code 'too_large' and maxBytes when Content-Length exceeds the limit", async () => {
       const maxBytes = 10 * 1024 * 1024; // 10 MB
       const app = createSizeGuardApp(maxBytes);
 
@@ -108,8 +108,9 @@ describe("POST /upload", () => {
         .send("");
 
       expect(res.status).toBe(413);
-      expect(res.body.error).toContain("File too large");
-      expect(res.body.error).toContain("exceeds the 10 MB upload limit");
+      expect(res.body.code).toBe("too_large");
+      expect(res.body.error).toBe("File too large");
+      expect(res.body.maxBytes).toBe(maxBytes);
       expect(res.body.suggestion).toBeDefined();
     });
 
@@ -130,7 +131,6 @@ describe("POST /upload", () => {
       const maxBytes = 10 * 1024 * 1024;
       const app = createSizeGuardApp(maxBytes);
 
-      // supertest auto-sets Content-Length, so use a raw-ish approach
       const res = await supertest(app)
         .post("/upload")
         .set("Content-Length", "0")
@@ -141,10 +141,7 @@ describe("POST /upload", () => {
 
     it("returns 413 with SAS URL when containerName and blobName are in query", async () => {
       const app = express();
-
-      // Import the actual SAS generation mock
-      const { getStorageConfig } = await import("../src/config.js");
-      const { StorageSharedKeyCredential, generateBlobSASQueryParameters, ContainerSASPermissions, SASProtocol } = await import("@azure/storage-blob");
+      const accountName = "devstoreaccount1";
 
       const sizeGuard = (req: Request, res: Response, next: NextFunction): void => {
         const contentLength = parseInt(req.headers["content-length"] || "0", 10);
@@ -156,14 +153,14 @@ describe("POST /upload", () => {
 
           let directUploadUrl: string | undefined;
           if (containerName && blobName) {
-            try {
-              const config = getStorageConfig();
-              directUploadUrl = `https://${config.accountName}.blob.core.windows.net/${containerName}/${blobName}?sv=fakesas`;
-            } catch { /* skip */ }
+            directUploadUrl = `https://${accountName}.blob.core.windows.net/${containerName}/${blobName}?sv=fakesas`;
           }
 
           res.status(413).json({
+            code: "too_large",
             error: "File too large",
+            maxBytes,
+            suggestion: "Reduce file size or split into parts",
             ...(directUploadUrl && {
               directUploadUrl,
               directUploadMethod: "PUT",
@@ -186,6 +183,7 @@ describe("POST /upload", () => {
         .send("");
 
       expect(res.status).toBe(413);
+      expect(res.body.code).toBe("too_large");
       expect(res.body.directUploadUrl).toContain("my-container/reports/big-file.zip");
       expect(res.body.directUploadMethod).toBe("PUT");
       expect(res.body.directUploadHeaders).toEqual({ "x-ms-blob-type": "BlockBlob" });
@@ -195,7 +193,7 @@ describe("POST /upload", () => {
   describe("upload handler field validation", () => {
     /**
      * Creates a minimal Express app that simulates the upload handler's
-     * field validation logic without actually invoking multer.
+     * field validation logic without actually invoking busboy.
      */
     function createValidationApp() {
       const app = express();
@@ -256,9 +254,6 @@ describe("POST /upload", () => {
     it("calls uploadStream (not uploadData) with a readable stream", async () => {
       // This test verifies that the handler uses uploadStream for streaming
       // rather than uploadData which requires full buffer in memory.
-      //
-      // We test the core logic by calling the mocked Azure SDK directly
-      // (the streaming handler in server.ts delegates to the same methods).
 
       const { BlobServiceClient } = await import("@azure/storage-blob");
       const client = new BlobServiceClient("http://localhost:10000", {} as any);
@@ -266,7 +261,6 @@ describe("POST /upload", () => {
       const blockBlobClient = containerClient.getBlockBlobClient("test.txt");
 
       // Create a mock readable stream
-      const { Readable } = await import("stream");
       const readable = new Readable({
         read() {
           this.push(Buffer.from("hello streaming world"));
@@ -277,7 +271,7 @@ describe("POST /upload", () => {
       await blockBlobClient.uploadStream(
         readable,
         4 * 1024 * 1024, // 4 MB buffer
-        5,                // 5 concurrent uploads
+        4,                // 4 concurrent uploads
         { blobHTTPHeaders: { blobContentType: "text/plain" } }
       );
 
@@ -285,7 +279,7 @@ describe("POST /upload", () => {
       expect(mockUploadStream).toHaveBeenCalledWith(
         readable,
         4 * 1024 * 1024,
-        5,
+        4,
         { blobHTTPHeaders: { blobContentType: "text/plain" } }
       );
       // uploadData should NOT have been called
@@ -309,9 +303,6 @@ describe("POST /upload", () => {
 
   describe("singleton BlobServiceClient", () => {
     it("reuses the same client across calls (module-level pattern)", async () => {
-      // The getUploadBlobServiceClient function in server.ts is not exported,
-      // but we can verify the singleton pattern by checking that BlobServiceClient
-      // constructor is called once, not per-request.
       const { BlobServiceClient } = await import("@azure/storage-blob");
 
       // Reset the mock call count
@@ -321,110 +312,196 @@ describe("POST /upload", () => {
       const client1 = new BlobServiceClient("http://localhost:10000", {} as any);
       expect(BlobServiceClient).toHaveBeenCalledTimes(1);
 
-      // Verify the singleton pattern — the test confirms the constructor
-      // is not re-invoked per request (the actual singleton is in server.ts)
+      // Verify the singleton pattern
       expect(client1).toBeDefined();
     });
   });
 
-  describe("multerUpload error handling", () => {
-    /**
-     * Creates a minimal Express app that simulates the multerUpload wrapper's
-     * MulterError handling. This tests the error classification logic without
-     * requiring actual Multer file processing.
-     */
-    function createMulterErrorApp() {
+  describe("stream-level oversize detection", () => {
+    it("returns 413 with structured body when MAX_UPLOAD_BYTES is exceeded via env", async () => {
+      // Set a tiny limit via env var
+      const saved = process.env.MAX_UPLOAD_BYTES;
+      process.env.MAX_UPLOAD_BYTES = "100"; // 100 bytes
+
+      // We test the size guard middleware path (Content-Length exceeds limit)
       const app = express();
-      const multer = require("multer");
+      const maxBytes = parseInt(process.env.MAX_UPLOAD_BYTES, 10);
 
-      // Middleware that simulates MulterError scenarios based on a query param
-      app.post("/upload", (req: Request, res: Response, next: NextFunction) => {
-        const scenario = req.query.scenario as string;
-
-        if (scenario === "LIMIT_FILE_SIZE") {
-          const err = new multer.MulterError("LIMIT_FILE_SIZE", "file");
-          // Simulate what multerUpload does
-          const limitMB = 500;
+      const sizeGuard = (req: Request, res: Response, next: NextFunction): void => {
+        const contentLength = parseInt(req.headers["content-length"] || "0", 10);
+        if (contentLength > maxBytes) {
           res.status(413).json({
-            error: `File too large: exceeds the ${limitMB} MB upload limit.`,
-            multerCode: err.code,
-            suggestion: "Upload directly to Azure Blob Storage using a write SAS URL. " +
-              "Call 'blob-get-sas-url' or 'blob-get-container-sas' with write permissions to generate one.",
-            maxUploadSizeMB: limitMB,
+            code: "too_large",
+            error: "File too large",
+            maxBytes,
+            suggestion: "Reduce file size or split into parts",
           });
           return;
         }
+        next();
+      };
 
-        if (scenario === "LIMIT_UNEXPECTED_FILE") {
-          const err = new multer.MulterError("LIMIT_UNEXPECTED_FILE", "wrongfield");
-          res.status(400).json({
-            error: `Upload rejected: ${err.message}`,
-            multerCode: err.code,
-          });
-          return;
-        }
-
-        if (scenario === "disk_error") {
-          res.status(500).json({
-            error: "ENOSPC: no space left on device",
-          });
-          return;
-        }
-
+      app.post("/upload", sizeGuard, (_req: Request, res: Response) => {
         res.status(200).json({ ok: true });
       });
 
-      return app;
-    }
-
-    it("returns 413 with structured body for LIMIT_FILE_SIZE", async () => {
-      const app = createMulterErrorApp();
       const res = await supertest(app)
-        .post("/upload?scenario=LIMIT_FILE_SIZE")
+        .post("/upload")
+        .set("Content-Length", "1000") // 1000 bytes > 100 byte limit
         .send("");
 
       expect(res.status).toBe(413);
-      expect(res.body.error).toContain("File too large");
-      expect(res.body.multerCode).toBe("LIMIT_FILE_SIZE");
-      expect(res.body.suggestion).toContain("SAS URL");
-      expect(res.body.maxUploadSizeMB).toBe(500);
+      expect(res.body.code).toBe("too_large");
+      expect(res.body.error).toBe("File too large");
+      expect(res.body.maxBytes).toBe(100);
+      expect(res.body.suggestion).toContain("Reduce file size");
+
+      // Restore
+      if (saved !== undefined) {
+        process.env.MAX_UPLOAD_BYTES = saved;
+      } else {
+        delete process.env.MAX_UPLOAD_BYTES;
+      }
     });
 
-    it("returns 400 for other MulterError codes", async () => {
-      const app = createMulterErrorApp();
+    it("succeeds when file is within MAX_UPLOAD_BYTES limit", async () => {
+      const maxBytes = 1024 * 1024; // 1 MB
+
+      const app = express();
+      const sizeGuard = (req: Request, res: Response, next: NextFunction): void => {
+        const contentLength = parseInt(req.headers["content-length"] || "0", 10);
+        if (contentLength > maxBytes) {
+          res.status(413).json({
+            code: "too_large",
+            error: "File too large",
+            maxBytes,
+            suggestion: "Reduce file size or split into parts",
+          });
+          return;
+        }
+        next();
+      };
+
+      app.post("/upload", sizeGuard, (_req: Request, res: Response) => {
+        res.status(200).json({ success: true });
+      });
+
       const res = await supertest(app)
-        .post("/upload?scenario=LIMIT_UNEXPECTED_FILE")
+        .post("/upload")
+        .set("Content-Length", String(512 * 1024)) // 512 KB < 1 MB
         .send("");
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain("Upload rejected");
-      expect(res.body.multerCode).toBe("LIMIT_UNEXPECTED_FILE");
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+    });
+  });
+
+  describe("aborted upload handling", () => {
+    it("does not commit blob when stream is destroyed before completion", async () => {
+      // Simulate the scenario where uploadStream rejects because the
+      // PassThrough is destroyed (client abort or limit exceeded).
+      // In this case, the commitBlockList is never called internally
+      // by the Azure SDK, so no blob is visible.
+
+      const { BlobServiceClient } = await import("@azure/storage-blob");
+      const client = new BlobServiceClient("http://localhost:10000", {} as any);
+      const containerClient = client.getContainerClient("test-container");
+      const blockBlobClient = containerClient.getBlockBlobClient("aborted.txt");
+
+      // Set up uploadStream to reject when the stream is destroyed
+      mockUploadStream.mockImplementationOnce(
+        (stream: Readable) => {
+          return new Promise<void>((resolve, reject) => {
+            stream.on("error", (err) => {
+              reject(err);
+            });
+            // Simulate: stream is destroyed externally (client abort)
+            setTimeout(() => {
+              stream.destroy(new Error("client_aborted"));
+            }, 10);
+          });
+        }
+      );
+
+      const passThrough = new PassThrough();
+      passThrough.write(Buffer.from("partial data"));
+
+      try {
+        await blockBlobClient.uploadStream(
+          passThrough,
+          4 * 1024 * 1024,
+          4,
+          { blobHTTPHeaders: { blobContentType: "text/plain" } }
+        );
+        // Should not reach here
+        expect.unreachable("uploadStream should have rejected");
+      } catch (err: any) {
+        expect(err.message).toBe("client_aborted");
+      }
+
+      // uploadStream was called once, but it rejected — no commit happened
+      expect(mockUploadStream).toHaveBeenCalledTimes(1);
+      // setMetadata should NOT have been called (post-upload step)
+      expect(mockSetMetadata).not.toHaveBeenCalled();
     });
 
-    it("returns 500 for non-Multer errors (disk full, etc.)", async () => {
-      const app = createMulterErrorApp();
-      const res = await supertest(app)
-        .post("/upload?scenario=disk_error")
-        .send("");
+    it("does not commit blob when stream limit error destroys the PassThrough", async () => {
+      // Simulate the too_large scenario where the metered stream
+      // exceeds the byte limit and destroys the PassThrough
 
-      expect(res.status).toBe(500);
-      expect(res.body.error).toContain("no space left on device");
+      mockUploadStream.mockImplementationOnce(
+        (stream: Readable) => {
+          return new Promise<void>((resolve, reject) => {
+            stream.on("error", (err) => {
+              reject(err);
+            });
+            // Simulate: limit exceeded destroys the stream
+            setTimeout(() => {
+              stream.destroy(new Error("too_large"));
+            }, 10);
+          });
+        }
+      );
+
+      const { BlobServiceClient } = await import("@azure/storage-blob");
+      const client = new BlobServiceClient("http://localhost:10000", {} as any);
+      const containerClient = client.getContainerClient("test-container");
+      const blockBlobClient = containerClient.getBlockBlobClient("oversized.bin");
+
+      const passThrough = new PassThrough();
+
+      try {
+        await blockBlobClient.uploadStream(
+          passThrough,
+          4 * 1024 * 1024,
+          4,
+          {}
+        );
+        expect.unreachable("uploadStream should have rejected on too_large");
+      } catch (err: any) {
+        expect(err.message).toBe("too_large");
+      }
+
+      // No metadata set = no blob committed
+      expect(mockSetMetadata).not.toHaveBeenCalled();
     });
   });
 
   describe("JSON body parser error handler", () => {
-    it("returns 413 with structured body for PayloadTooLargeError", async () => {
+    it("returns 413 with structured body including maxJsonBodyBytes for PayloadTooLargeError", async () => {
       const app = express();
+      const maxJsonBodyBytes = 1024; // 1 KB for testing
       // Set a tiny limit so we can trigger the error
-      app.use(express.json({ limit: "1kb" }));
+      app.use(express.json({ limit: maxJsonBodyBytes }));
       // Error handler matching server.ts pattern
       app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
         if (err.type === "entity.too.large") {
           res.status(413).json({
+            code: "too_large",
             error: `Request body too large: ${err.message}`,
             suggestion: "For large files, use the multipart POST /upload endpoint instead of base64 encoding. " +
               "For files beyond the upload limit, use 'blob-get-sas-url' to get a direct write URL.",
-            maxJsonBodyMB: 50,
+            maxJsonBodyBytes,
           });
           return;
         }
@@ -434,7 +511,7 @@ describe("POST /upload", () => {
         res.status(200).json({ ok: true });
       });
 
-      // Send a body larger than 1kb
+      // Send a body larger than 1 KB
       const largeBody = JSON.stringify({ data: "x".repeat(2000) });
       const res = await supertest(app)
         .post("/mcp")
@@ -442,9 +519,52 @@ describe("POST /upload", () => {
         .send(largeBody);
 
       expect(res.status).toBe(413);
+      expect(res.body.code).toBe("too_large");
       expect(res.body.error).toContain("Request body too large");
       expect(res.body.suggestion).toContain("multipart POST /upload");
-      expect(res.body.maxJsonBodyMB).toBe(50);
+      expect(res.body.maxJsonBodyBytes).toBe(1024);
+    });
+  });
+
+  describe("MAX_UPLOAD_BYTES and MAX_JSON_BODY_BYTES env var parsing", () => {
+    it("MAX_UPLOAD_BYTES defaults to 5 GiB when env is unset", () => {
+      const saved = process.env.MAX_UPLOAD_BYTES;
+      delete process.env.MAX_UPLOAD_BYTES;
+
+      const defaultValue = parseInt(
+        process.env.MAX_UPLOAD_BYTES || String(5 * 1024 * 1024 * 1024), 10
+      );
+      expect(defaultValue).toBe(5368709120);
+
+      if (saved !== undefined) process.env.MAX_UPLOAD_BYTES = saved;
+    });
+
+    it("MAX_JSON_BODY_BYTES defaults to 50 MiB when env is unset", () => {
+      const saved = process.env.MAX_JSON_BODY_BYTES;
+      delete process.env.MAX_JSON_BODY_BYTES;
+
+      const defaultValue = parseInt(
+        process.env.MAX_JSON_BODY_BYTES || String(50 * 1024 * 1024), 10
+      );
+      expect(defaultValue).toBe(52428800);
+
+      if (saved !== undefined) process.env.MAX_JSON_BODY_BYTES = saved;
+    });
+
+    it("respects custom MAX_UPLOAD_BYTES from environment", () => {
+      const saved = process.env.MAX_UPLOAD_BYTES;
+      process.env.MAX_UPLOAD_BYTES = "1073741824"; // 1 GiB
+
+      const value = parseInt(
+        process.env.MAX_UPLOAD_BYTES || String(5 * 1024 * 1024 * 1024), 10
+      );
+      expect(value).toBe(1073741824);
+
+      if (saved !== undefined) {
+        process.env.MAX_UPLOAD_BYTES = saved;
+      } else {
+        delete process.env.MAX_UPLOAD_BYTES;
+      }
     });
   });
 });

@@ -431,7 +431,9 @@ print(response.json())
 | `blobName` | No | Blob name (defaults to the uploaded filename) |
 | `metadata` | No | JSON string of key-value metadata |
 
-**Limits:** 100 MB per upload. For larger files, use Option 3 below.
+**Streaming:** The `/upload` endpoint streams files directly to Azure Blob Storage without buffering the entire file in memory or on disk. This keeps server memory bounded even for multi-GB uploads. Oversized files (exceeding `MAX_UPLOAD_BYTES`, default 5 GiB) are rejected with HTTP 413 and a structured JSON body containing `code: "too_large"` and `maxBytes`.
+
+**Limits:** Default 5 GiB per upload (configurable via `MAX_UPLOAD_BYTES`). For larger files, use Option 3 below.
 
 ### Option 3 — SAS URL direct upload (for very large files)
 
@@ -982,6 +984,8 @@ azd down --purge
 | `MAX_SESSIONS` | No | `100` | Maximum concurrent stateful MCP sessions (returns 503 when full) |
 | `SESSION_RETRY_AFTER_SECONDS` | No | `30` | Retry hint (seconds) returned in 503 session-capacity errors |
 | `SSE_KEEPALIVE_INTERVAL_MS` | No | `30000` | Interval (ms) between SSE keepalive heartbeats. Prevents Azure reverse proxy from killing idle SSE connections (~240s timeout). |
+| `MAX_UPLOAD_BYTES` | No | `5368709120` | Hard byte limit for streaming multipart uploads via `/upload`. Default: 5 GiB. Files exceeding this are rejected with HTTP 413 (`code: "too_large"`). |
+| `MAX_JSON_BODY_BYTES` | No | `52428800` | Hard byte limit for JSON request bodies on `/mcp`. Default: 50 MiB. Controls `express.json({ limit })`. Oversized JSON bodies return HTTP 413. |
 
 > **Note:** The Azure deployment uses `minReplicas: 1` to keep at least one replica always running, ensuring consistent response times and no cold-start connection drops. The Container App auto-scales up to 5 replicas under load (HTTP concurrency threshold: 20 requests). If you want to reduce costs in a non-production environment, you can set `minReplicas: 0` in [`infra/main.bicep`](infra/main.bicep:342), but be aware that scale-to-zero causes 10–30 second cold starts that may time out HTTP clients like Postman.
 
@@ -1003,7 +1007,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 - **Constant-time comparison** — API key validation uses `crypto.timingSafeEqual` to prevent timing attacks
 - **No query-param auth** — API keys are only accepted via headers (not URLs that leak to logs)
 - **SSRF protection** — `blob-upload-from-url` validates URLs before fetching: blocks loopback, link-local (Azure IMDS 169.254.169.254), private RFC 1918 ranges, non-HTTP schemes, and open redirects (`redirect: "error"`)
-- **Upload limits** — `POST /upload` capped at 100 MB via `multer`; rate-limited by the same per-IP limiter as `/mcp`
+- **Streaming uploads** — `POST /upload` streams directly to Azure Blob Storage via busboy + `uploadStream` (no temp files, no full-file buffering). Capped at `MAX_UPLOAD_BYTES` (default 5 GiB); oversized files return 413 with `code: "too_large"`. Rate-limited by the same per-identity limiter as `/mcp`
 - **Helmet** — sets security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
 - **Rate limiting** — per-IP request throttling on both `/mcp` and `/upload` endpoints
 - **Session TTL** — idle sessions are automatically evicted after 30 minutes

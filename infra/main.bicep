@@ -416,6 +416,19 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'AZURE_USE_MANAGED_IDENTITY'
               value: 'false'
             }
+            {
+              // Hard byte limit for streaming multipart uploads via /upload.
+              // Default: 5 GiB (5368709120). Files beyond this are rejected
+              // with a 413 response containing a write SAS URL hint.
+              name: 'MAX_UPLOAD_BYTES'
+              value: '5368709120'
+            }
+            {
+              // Hard byte limit for JSON request bodies on /mcp.
+              // Default: 50 MiB (52428800). Controls express.json({ limit }).
+              name: 'MAX_JSON_BODY_BYTES'
+              value: '52428800'
+            }
           ]
         }
       ]

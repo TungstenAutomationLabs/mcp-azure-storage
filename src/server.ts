@@ -26,11 +26,8 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import multer, { MulterError } from "multer";
-import { createReadStream } from "fs";
-import { unlink } from "fs/promises";
-import { tmpdir } from "os";
-import path from "path";
+import Busboy from "busboy";
+import { PassThrough } from "stream";
 import crypto from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -212,9 +209,21 @@ const uploadLimiter = rateLimit({
   },
 });
 
+// ── Body size limits ─────────────────────────────────────────────────────────
+// MAX_UPLOAD_BYTES — hard byte limit for streaming multipart uploads via /upload.
+//   Default: 5 GiB (5368709120). Files beyond this should use a write SAS URL.
+// MAX_JSON_BODY_BYTES — hard byte limit for JSON bodies on /mcp (base64 payloads).
+//   Default: 50 MiB (52428800). Controls express.json({ limit }).
+export const MAX_UPLOAD_BYTES = parseInt(
+  process.env.MAX_UPLOAD_BYTES || String(5 * 1024 * 1024 * 1024), 10
+);
+export const MAX_JSON_BODY_BYTES = parseInt(
+  process.env.MAX_JSON_BODY_BYTES || String(50 * 1024 * 1024), 10
+);
+
 // Accept large JSON payloads (base64-encoded files can be tens of MB).
 // Files beyond this limit should use the multipart /upload endpoint instead.
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: MAX_JSON_BODY_BYTES }));
 
 // ── JSON body parser error handler ───────────────────────────────────────────
 // When express.json() rejects a request (e.g. PayloadTooLargeError), Express
@@ -225,10 +234,11 @@ app.use(express.json({ limit: "50mb" }));
 app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
   if (err.type === "entity.too.large") {
     res.status(413).json({
+      code: "too_large",
       error: `Request body too large: ${err.message}`,
       suggestion: "For large files, use the multipart POST /upload endpoint instead of base64 encoding. " +
         "For files beyond the upload limit, use 'blob-get-sas-url' to get a direct write URL.",
-      maxJsonBodyMB: 50,
+      maxJsonBodyBytes: MAX_JSON_BODY_BYTES,
     });
     return;
   }
@@ -553,17 +563,17 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// POST /upload — Direct file upload via multipart form-data
+// POST /upload — Direct file upload via multipart form-data (streaming)
 //
 // This REST endpoint bypasses the MCP JSON-RPC transport entirely, allowing
 // any HTTP client (curl, Python, browser, CI/CD) to upload files directly
 // to Azure Blob Storage without base64 encoding.
 //
-// Files are written to a temp directory on disk (not buffered in RAM), then
-// streamed to Azure Blob Storage via uploadStream. This avoids OOM errors
-// for large files.
+// The file is streamed directly from the HTTP request to Azure Blob Storage
+// via busboy + BlockBlobClient.uploadStream. No temp files, no full-file
+// buffering in memory. This keeps RSS bounded even for multi-GB uploads.
 //
-// If Content-Length exceeds MAX_UPLOAD_SIZE_BYTES, the request is rejected
+// If Content-Length exceeds MAX_UPLOAD_BYTES, the request is rejected
 // early with a 413 response that includes a pre-signed write SAS URL so
 // the caller can upload directly to Azure Storage, bypassing this server.
 //
@@ -576,13 +586,6 @@ app.get("/health", (_req: Request, res: Response) => {
 //
 // Security: Protected by the same API key middleware as /mcp.
 // ══════════════════════════════════════════════════════════════════════════════
-
-// ── Upload size limit ────────────────────────────────────────────────────────
-// Configurable via MAX_UPLOAD_SIZE_MB env var (default: 500 MB).
-// Files larger than this should be uploaded directly to Azure using a write
-// SAS URL (returned in the 413 error response).
-const MAX_UPLOAD_SIZE_MB = parseInt(process.env.MAX_UPLOAD_SIZE_MB || "500", 10);
-const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
 
 // ── Singleton BlobServiceClient for /upload ──────────────────────────────────
 // Reuses the same HTTP connection pool across all upload requests, matching
@@ -600,86 +603,22 @@ async function getUploadBlobServiceClient(): Promise<BlobServiceClient> {
   return _uploadBlobServiceClient;
 }
 
-// Multer writes uploaded files to a temp directory on disk instead of
-// buffering in memory. This prevents OOM for large files. Temp files are
-// cleaned up in the request handler's finally block.
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: tmpdir(),
-    filename: (_req, file, cb) => {
-      // Unique filename to avoid collisions from concurrent uploads
-      const unique = `mcp-upload-${Date.now()}-${randomUUID()}`;
-      const ext = path.extname(file.originalname || "");
-      cb(null, `${unique}${ext}`);
-    },
-  }),
-  limits: { fileSize: MAX_UPLOAD_SIZE_BYTES },
-});
-
-/**
- * Wraps Multer's upload.single() middleware so that MulterErrors
- * (especially LIMIT_FILE_SIZE) are caught and returned as structured
- * JSON with the correct HTTP status code (413 or 400) instead of
- * falling through to Express's default 500 handler.
- *
- * Without this wrapper, Multer calls next(err) which bypasses the
- * route handler's try/catch entirely.
- */
-function multerUpload(req: Request, res: Response, next: NextFunction): void {
-  upload.single("file")(req, res, (err: unknown) => {
-    if (!err) return next();
-
-    // Clean up the temp file if Multer already wrote part of it
-    if (req.file?.path) {
-      unlink(req.file.path).catch(() => { /* best-effort */ });
-    }
-
-    if (err instanceof MulterError) {
-      if (err.code === "LIMIT_FILE_SIZE") {
-        const limitMB = MAX_UPLOAD_SIZE_MB;
-        res.status(413).json({
-          error: `File too large: exceeds the ${limitMB} MB upload limit.`,
-          multerCode: err.code,
-          suggestion: "Upload directly to Azure Blob Storage using a write SAS URL. " +
-            "Call 'blob-get-sas-url' or 'blob-get-container-sas' with write permissions to generate one.",
-          maxUploadSizeMB: limitMB,
-        });
-        return;
-      }
-      // Other Multer errors (LIMIT_UNEXPECTED_FILE, etc.)
-      res.status(400).json({
-        error: `Upload rejected: ${err.message}`,
-        multerCode: err.code,
-      });
-      return;
-    }
-
-    // Non-Multer error (disk full, stream error, etc.)
-    const message = err instanceof Error ? err.message : "Upload failed during file reception";
-    console.error("Multer error:", err);
-    res.status(500).json({ error: message });
-  });
-}
-
 /**
  * Content-Length pre-check middleware.
  *
  * If the Content-Length header indicates a file larger than the configured
  * limit, reject immediately with 413 and a helpful JSON body. For requests
- * that include a containerName and blobName in the query string or are
- * parseable, we include a pre-signed write SAS URL so the caller can upload
- * directly to Azure Storage instead.
+ * that include a containerName and blobName in the query string, we include
+ * a pre-signed write SAS URL so the caller can upload directly to Azure
+ * Storage instead.
  *
- * This fires BEFORE Multer starts consuming the request body, so the
+ * This fires BEFORE busboy starts consuming the request body, so the
  * connection is closed cleanly — no partial reads, no hung streams.
  */
 function uploadSizeGuard(req: Request, res: Response, next: NextFunction): void {
   const contentLength = parseInt(req.headers["content-length"] || "0", 10);
 
-  if (contentLength > MAX_UPLOAD_SIZE_BYTES) {
-    const sizeMB = (contentLength / (1024 * 1024)).toFixed(1);
-    const limitMB = MAX_UPLOAD_SIZE_MB;
-
+  if (contentLength > MAX_UPLOAD_BYTES) {
     // Best-effort: generate a write SAS URL if we can parse enough from the request
     // to know the container. Query params are available before body parsing.
     let directUploadUrl: string | undefined;
@@ -711,8 +650,10 @@ function uploadSizeGuard(req: Request, res: Response, next: NextFunction): void 
     }
 
     res.status(413).json({
-      error: `File too large: ${sizeMB} MB exceeds the ${limitMB} MB upload limit.`,
-      suggestion: "Upload directly to Azure Blob Storage using the SAS URL below, or use 'blob-get-container-sas' with write permissions to generate one.",
+      code: "too_large",
+      error: "File too large",
+      maxBytes: MAX_UPLOAD_BYTES,
+      suggestion: "Reduce file size or split into parts",
       ...(directUploadUrl && {
         directUploadUrl,
         directUploadMethod: "PUT",
@@ -726,99 +667,297 @@ function uploadSizeGuard(req: Request, res: Response, next: NextFunction): void 
   next();
 }
 
-app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, multerUpload, async (req: Request, res: Response) => {
-  let tempFilePath: string | undefined;
+/**
+ * Streaming upload handler using busboy.
+ *
+ * Parses multipart/form-data on the fly. The file field ("file") is piped
+ * through a metered PassThrough that enforces MAX_UPLOAD_BYTES at the stream
+ * level, then directly to Azure Blob Storage via BlockBlobClient.uploadStream.
+ *
+ * Because uploadStream commits the blob only after ALL blocks are uploaded
+ * (via commitBlockList), aborting the stream mid-upload means the final
+ * commit never happens and no partial blob is visible.
+ *
+ * Form fields (containerName, blobName, metadata) may arrive before or after
+ * the file — busboy emits them in order, so we collect fields as they arrive
+ * and start the Azure upload only once the file stream begins. Field
+ * validation happens after busboy's "close" event when all parts have been
+ * received.
+ */
+app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, res: Response) => {
+  // Guard: Content-Type must be multipart/form-data
+  const ct = req.headers["content-type"] || "";
+  if (!ct.includes("multipart/form-data")) {
+    res.status(400).json({ error: "Expected Content-Type: multipart/form-data" });
+    return;
+  }
 
-  try {
-    const file = req.file;
-    if (!file) {
+  // ── State for collecting form parts ──
+  const fields: Record<string, string> = {};
+  let fileReceived = false;
+  let fileName = "";
+  let mimeType = "application/octet-stream";
+  let bytesReceived = 0;
+  let limitExceeded = false;
+  let responded = false;    // guard against double-response
+  let uploadPromise: Promise<void> | null = null;
+  let filePassThrough: PassThrough | null = null;
+
+  // ── Constants for Azure upload ──
+  const UPLOAD_BUFFER_SIZE = 4 * 1024 * 1024; // 4 MiB per block
+  const MAX_BUFFERS = 4;                       // bounded concurrency
+
+  const bb = Busboy({
+    headers: req.headers as Record<string, string>,
+    limits: {
+      fileSize: MAX_UPLOAD_BYTES,
+      files: 1,        // accept exactly one file field
+    },
+  });
+
+  // ── Field handler — collect containerName, blobName, metadata ──
+  bb.on("field", (name: string, value: string) => {
+    fields[name] = value;
+  });
+
+  // ── File handler — stream to Azure via PassThrough ──
+  bb.on("file", (name: string, stream, info) => {
+    if (name !== "file") {
+      // Drain unexpected file fields
+      stream.resume();
+      return;
+    }
+
+    fileReceived = true;
+    fileName = info.filename;
+    mimeType = info.mimeType || "application/octet-stream";
+
+    // Metered PassThrough — counts bytes and enforces limit
+    filePassThrough = new PassThrough();
+
+    stream.on("data", (chunk: Buffer) => {
+      bytesReceived += chunk.length;
+      if (bytesReceived > MAX_UPLOAD_BYTES && !limitExceeded) {
+        limitExceeded = true;
+        // Destroy the PassThrough to signal abort to uploadStream.
+        // This causes uploadStream to reject before committing.
+        filePassThrough!.destroy(new Error("too_large"));
+        stream.destroy();
+      }
+    });
+
+    // busboy emits 'limit' when fileSize limit is hit
+    stream.on("limit", () => {
+      if (!limitExceeded) {
+        limitExceeded = true;
+        filePassThrough!.destroy(new Error("too_large"));
+      }
+    });
+
+    stream.pipe(filePassThrough);
+
+    // Start the Azure upload immediately — uploadStream reads from the
+    // PassThrough as data arrives. The commit happens only when the stream
+    // ends successfully (all blocks uploaded + commitBlockList).
+    uploadPromise = (async () => {
+      const containerName = fields.containerName;
+      const blobName = fields.blobName || fileName;
+
+      // We start the upload even before we've validated fields, because
+      // fields may arrive after the file in the multipart stream. The
+      // actual Azure call needs containerName/blobName, so if they haven't
+      // arrived yet we defer validation to the "close" handler. However,
+      // uploadStream needs a real client, so we start it here only if we
+      // have enough info. If containerName isn't available yet, we buffer
+      // into the PassThrough until close, then validate + upload.
+      //
+      // For simplicity and reliability: we always pipe to the PassThrough,
+      // and start the Azure upload in the close handler after all fields
+      // are known. However, this means the PassThrough buffers data until
+      // close is called for field validation — but uploadStream consumes
+      // the PassThrough concurrently (it reads in 4 MiB chunks), so memory
+      // stays bounded as long as we start the upload early.
+      //
+      // Revised approach: start upload here if containerName is already
+      // available (most clients send fields before file), otherwise the
+      // close handler will do it.
+      if (!containerName) {
+        // Fields haven't arrived yet — upload will be started in close handler
+        return;
+      }
+
+      const blobServiceClient = await getUploadBlobServiceClient();
+      const containerClient = blobServiceClient.getContainerClient(containerName);
+      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+
+      await blockBlobClient.uploadStream(
+        filePassThrough!,
+        UPLOAD_BUFFER_SIZE,
+        MAX_BUFFERS,
+        {
+          blobHTTPHeaders: { blobContentType: mimeType },
+        }
+      );
+    })();
+  });
+
+  // ── Close handler — all parts received; validate and respond ──
+  bb.on("close", async () => {
+    if (responded) return;
+
+    // ── Check if the stream limit was exceeded ──
+    if (limitExceeded) {
+      responded = true;
+      if (!res.headersSent) {
+        res.status(413).json({
+          code: "too_large",
+          error: "File too large",
+          maxBytes: MAX_UPLOAD_BYTES,
+          suggestion: "Reduce file size or split into parts",
+        });
+      }
+      return;
+    }
+
+    // ── Validate required fields ──
+    if (!fileReceived) {
+      responded = true;
       res.status(400).json({ error: "No file provided. Send a multipart form with a 'file' field." });
       return;
     }
 
-    // Track the temp file path for cleanup
-    tempFilePath = file.path;
-
-    const containerName = req.body.containerName;
+    const containerName = fields.containerName;
     if (!containerName) {
+      responded = true;
+      // Destroy the PassThrough to abort any pending upload
+      filePassThrough?.destroy(new Error("missing_field"));
       res.status(400).json({ error: "Missing required field: containerName" });
       return;
     }
 
-    // Use provided blobName, or fall back to the original filename
-    const blobName = req.body.blobName || file.originalname;
+    const blobName = fields.blobName || fileName;
     if (!blobName) {
+      responded = true;
+      filePassThrough?.destroy(new Error("missing_field"));
       res.status(400).json({ error: "Missing required field: blobName (or upload a file with a filename)" });
       return;
     }
 
-    // Parse optional metadata from JSON string
+    // ── Parse optional metadata ──
     let metadata: Record<string, string> | undefined;
-    if (req.body.metadata) {
+    if (fields.metadata) {
       try {
-        metadata = JSON.parse(req.body.metadata);
+        metadata = JSON.parse(fields.metadata);
       } catch {
+        responded = true;
+        filePassThrough?.destroy(new Error("invalid_metadata"));
         res.status(400).json({ error: "Invalid metadata JSON. Provide a JSON object string, e.g. '{\"author\":\"Alice\"}'" });
         return;
       }
     }
 
-    const blobServiceClient = await getUploadBlobServiceClient();
-    const containerClient = blobServiceClient.getContainerClient(containerName);
-    const blockBlobClient = containerClient.getBlockBlobClient(blobName);
-
-    // Use the MIME type from multer (which reads the Content-Type header from the
-    // multipart part), or fall back to octet-stream
-    const contentType = file.mimetype || "application/octet-stream";
-
-    // Stream the temp file to Azure Blob Storage.
-    // uploadStream handles chunking (4 MB blocks) and parallel transfers
-    // (5 concurrent) internally, avoiding loading the entire file into memory.
-    const fileStream = createReadStream(tempFilePath);
-    const uploadBufferSize = 4 * 1024 * 1024;  // 4 MB per block
-    const maxConcurrency = 5;
-
-    await blockBlobClient.uploadStream(
-      fileStream,
-      uploadBufferSize,
-      maxConcurrency,
-      {
-        blobHTTPHeaders: { blobContentType: contentType },
+    try {
+      // If upload was already started (containerName was available when file arrived),
+      // just wait for it to complete. Otherwise, start it now.
+      if (uploadPromise) {
+        await uploadPromise;
+        // If the upload promise resolved without actually calling uploadStream
+        // (because containerName wasn't available), we need to do it now
+        if (!fields.containerName) {
+          // This branch shouldn't normally happen — containerName was checked above
+          throw new Error("containerName not available for upload");
+        }
       }
-    );
 
-    if (metadata && Object.keys(metadata).length > 0) {
-      await blockBlobClient.setMetadata(metadata);
-    }
+      // If uploadPromise was null (no file handler fired — shouldn't happen since
+      // fileReceived is true above), or if containerName wasn't available when the
+      // file handler fired, do the upload now.
+      if (!uploadPromise || !fields.containerName) {
+        // containerName was validated above, so this is the deferred-upload path
+        const blobServiceClient = await getUploadBlobServiceClient();
+        const containerClient = blobServiceClient.getContainerClient(containerName);
+        const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
-    res.status(200).json({
-      success: true,
-      blobName,
-      containerName,
-      contentType,
-      size: file.size,
-      metadataSet: metadata ? Object.keys(metadata).length : 0,
-    });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Upload failed";
-    console.error("Upload error:", error);
-    if (!res.headersSent) {
-      // Distinguish Azure SDK size/timeout errors from other failures
-      const isTimeout = message.includes("timeout") || message.includes("ETIMEDOUT");
-      const status = isTimeout ? 504 : 500;
-      res.status(status).json({
-        error: message,
-        suggestion: status === 504
-          ? "The upload timed out. For large files, use a write SAS URL to upload directly to Azure Blob Storage."
-          : "Upload failed. Check server logs for details.",
+        await blockBlobClient.uploadStream(
+          filePassThrough!,
+          UPLOAD_BUFFER_SIZE,
+          MAX_BUFFERS,
+          {
+            blobHTTPHeaders: { blobContentType: mimeType },
+          }
+        );
+      }
+
+      // ── Set metadata (separate call, after blob is committed) ──
+      if (metadata && Object.keys(metadata).length > 0) {
+        const blobServiceClient = await getUploadBlobServiceClient();
+        const containerClient = blobServiceClient.getContainerClient(containerName);
+        const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+        await blockBlobClient.setMetadata(metadata);
+      }
+
+      responded = true;
+      res.status(200).json({
+        success: true,
+        blobName,
+        containerName,
+        contentType: mimeType,
+        size: bytesReceived,
+        metadataSet: metadata ? Object.keys(metadata).length : 0,
       });
+    } catch (error: unknown) {
+      if (responded) return;
+      responded = true;
+      const message = error instanceof Error ? error.message : "Upload failed";
+
+      // Check if this was a limit error from our metered stream
+      if (message === "too_large") {
+        if (!res.headersSent) {
+          res.status(413).json({
+            code: "too_large",
+            error: "File too large",
+            maxBytes: MAX_UPLOAD_BYTES,
+            suggestion: "Reduce file size or split into parts",
+          });
+        }
+        return;
+      }
+
+      console.error("Upload error:", error);
+      if (!res.headersSent) {
+        const isTimeout = message.includes("timeout") || message.includes("ETIMEDOUT");
+        const status = isTimeout ? 504 : 500;
+        res.status(status).json({
+          error: message,
+          suggestion: status === 504
+            ? "The upload timed out. For large files, use a write SAS URL to upload directly to Azure Blob Storage."
+            : "Upload failed. Check server logs for details.",
+        });
+      }
     }
-  } finally {
-    // Always clean up the temp file, whether the upload succeeded or failed.
-    if (tempFilePath) {
-      unlink(tempFilePath).catch(() => { /* best-effort cleanup */ });
+  });
+
+  // ── Error handler — busboy parse errors ──
+  bb.on("error", (err: Error) => {
+    if (responded) return;
+    responded = true;
+    filePassThrough?.destroy(err);
+    console.error("Busboy parse error:", err);
+    if (!res.headersSent) {
+      res.status(400).json({ error: `Multipart parse error: ${err.message}` });
     }
-  }
+  });
+
+  // ── Client abort — destroy busboy to stop processing ──
+  req.on("close", () => {
+    if (!res.writableFinished) {
+      // Client disconnected before upload completed
+      filePassThrough?.destroy(new Error("client_aborted"));
+    }
+  });
+
+  // Pipe the incoming request into busboy
+  req.pipe(bb);
 });
 
 // ── Start HTTP server ────────────────────────────────────────────────────────
@@ -837,8 +976,8 @@ const httpServer = app.listen(PORT, () => {
   console.log(`   Session TTL  : ${SESSION_TTL_MS / 60000} minutes`);
   console.log(`   Max sessions : ${MAX_SESSIONS}`);
   console.log(`   SSE keepalive: ${SSE_KEEPALIVE_INTERVAL_MS / 1000}s`);
-  console.log(`   JSON limit   : 50mb`);
-  console.log(`   Upload limit : ${MAX_UPLOAD_SIZE_MB}mb (streaming via disk)\n`);
+  console.log(`   JSON limit   : ${(MAX_JSON_BODY_BYTES / (1024 * 1024)).toFixed(0)}mb`);
+  console.log(`   Upload limit : ${(MAX_UPLOAD_BYTES / (1024 * 1024)).toFixed(0)}mb (streaming to Azure)\n`);
 });
 
 // ── Graceful shutdown ────────────────────────────────────────────────────────
