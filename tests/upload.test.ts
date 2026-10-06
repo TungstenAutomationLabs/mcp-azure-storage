@@ -411,4 +411,40 @@ describe("POST /upload", () => {
       expect(res.body.error).toContain("no space left on device");
     });
   });
+
+  describe("JSON body parser error handler", () => {
+    it("returns 413 with structured body for PayloadTooLargeError", async () => {
+      const app = express();
+      // Set a tiny limit so we can trigger the error
+      app.use(express.json({ limit: "1kb" }));
+      // Error handler matching server.ts pattern
+      app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+        if (err.type === "entity.too.large") {
+          res.status(413).json({
+            error: `Request body too large: ${err.message}`,
+            suggestion: "For large files, use the multipart POST /upload endpoint instead of base64 encoding. " +
+              "For files beyond the upload limit, use 'blob-get-sas-url' to get a direct write URL.",
+            maxJsonBodyMB: 50,
+          });
+          return;
+        }
+        next(err);
+      });
+      app.post("/mcp", (_req: Request, res: Response) => {
+        res.status(200).json({ ok: true });
+      });
+
+      // Send a body larger than 1kb
+      const largeBody = JSON.stringify({ data: "x".repeat(2000) });
+      const res = await supertest(app)
+        .post("/mcp")
+        .set("Content-Type", "application/json")
+        .send(largeBody);
+
+      expect(res.status).toBe(413);
+      expect(res.body.error).toContain("Request body too large");
+      expect(res.body.suggestion).toContain("multipart POST /upload");
+      expect(res.body.maxJsonBodyMB).toBe(50);
+    });
+  });
 });

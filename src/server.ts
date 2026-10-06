@@ -116,8 +116,29 @@ const limiter = rateLimit({
 app.use("/mcp", limiter);
 app.use("/upload", limiter);
 
-// Accept large JSON payloads (base64-encoded files can be tens of MB)
+// Accept large JSON payloads (base64-encoded files can be tens of MB).
+// Files beyond this limit should use the multipart /upload endpoint instead.
 app.use(express.json({ limit: "50mb" }));
+
+// ── JSON body parser error handler ───────────────────────────────────────────
+// When express.json() rejects a request (e.g. PayloadTooLargeError), Express
+// emits a bare 500. This middleware intercepts those errors and returns
+// structured JSON with the correct HTTP status so callers can choose an
+// alternative path (multipart upload, SAS URL, etc.) instead of discovering
+// the limit by failing.
+app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (err.type === "entity.too.large") {
+    res.status(413).json({
+      error: `Request body too large: ${err.message}`,
+      suggestion: "For large files, use the multipart POST /upload endpoint instead of base64 encoding. " +
+        "For files beyond the upload limit, use 'blob-get-sas-url' to get a direct write URL.",
+      maxJsonBodyMB: 50,
+    });
+    return;
+  }
+  // Pass other errors through
+  next(err);
+});
 
 // ── MCP server factory ───────────────────────────────────────────────────────
 
