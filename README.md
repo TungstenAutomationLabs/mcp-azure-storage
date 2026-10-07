@@ -312,7 +312,7 @@ if (response.isError) {
 | `fileshare-read-file` | Download file content as base64. Use `util-from-base64` to decode text. |
 | `fileshare-delete-file` | **Destructive** — permanently delete a file from a share. |
 
-### Utilities (7 tools)
+### Utilities (8 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -323,6 +323,58 @@ if (response.isError) {
 | `util-get-content-type` | MIME type lookup by file name or extension. Returns `application/octet-stream` for unrecognised types. |
 | `util-to-container-name` | Sanitise arbitrary text (email, URL, display name) into a valid Azure container name. Use BEFORE `blob-container-create`. |
 | `util-get-upload-url` | Get the direct file upload endpoint URL, required fields, and usage examples. Use when uploading large or binary files that exceed base64/JSON-RPC limits. |
+| `store-info` | Read-only snapshot of server runtime configuration, limits, disabled tools, auth mode, endpoints, and capabilities. Use to discover upload/body size limits and self-calibrate client behaviour. No secrets included. |
+
+#### `store-info` — Server Configuration Discovery
+
+The `store-info` tool returns a read-only snapshot of the server's runtime configuration and capabilities. It is intended for MCP clients to self-calibrate limits (e.g. max upload size, SAS expiry ceiling) and discover which tools are available without trial-and-error probing.
+
+**Inputs:** `{ format?: "json" | "html" | "md" }` (default `"json"`)
+
+**Output schema:**
+
+```json
+{
+  "ok": true,
+  "limits": {
+    "maxUploadBytes": 5368709120,
+    "maxJsonBodyBytes": 52428800,
+    "sasMaxExpiryMinutes": 1440
+  },
+  "sas": {
+    "protocol": "https"
+  },
+  "disabledTools": [],
+  "auth": {
+    "mode": "shared_key",
+    "accountName": "mystorageaccount"
+  },
+  "endpoints": {
+    "blobServiceUrl": "https://mystorageaccount.blob.core.windows.net"
+  },
+  "capabilities": {
+    "versions": null,
+    "archiveTier": null,
+    "maxContainerConcurrency": 4
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `limits.maxUploadBytes` | Maximum file size for `POST /upload` (env: `MAX_UPLOAD_BYTES`, default 5 GiB). |
+| `limits.maxJsonBodyBytes` | Maximum JSON body size for `/mcp` (env: `MAX_JSON_BODY_BYTES`, default 50 MiB). |
+| `limits.sasMaxExpiryMinutes` | Ceiling for SAS token lifetime (env: `SAS_MAX_EXPIRY_MINUTES`, default 1440). |
+| `sas.protocol` | SAS protocol: `"https"` or `"https,http"` (env: `SAS_PROTOCOL`). |
+| `disabledTools` | Canonical (lowercase) list of tools disabled via `DISABLED_TOOLS`. |
+| `auth.mode` | Authentication mode: `"shared_key"`, `"managed_identity"`, or `"dual"`. |
+| `auth.accountName` | Azure Storage account name. |
+| `endpoints.blobServiceUrl` | Base URL for blob service operations (respects Azurite overrides). |
+| `capabilities.versions` | `null` (unknown); `true`/`false` if blob versioning support is detected. |
+| `capabilities.archiveTier` | `null` (unknown); `true`/`false` if Archive tier operations are permitted. |
+| `capabilities.maxContainerConcurrency` | Indicative concurrency for upload streaming (default 4). Not a strict guarantee. |
+
+> **Security:** No secrets, keys, SAS tokens, or connection strings are included in the output.
 
 ### MCP Resources (12 resources)
 
@@ -979,6 +1031,8 @@ azd down --purge
 | `CORS_ENABLED` | No | `true` | Enable CORS headers for browser-based clients (MCP Inspector, web chat). Set `false` in production if only non-browser clients connect. |
 | `SAS_EXPIRY_HOURS` | No | `24` | Default SAS token expiry (hours) |
 | `SAS_DEFAULT_PERMISSIONS` | No | `rl` | Default SAS permissions |
+| `SAS_MAX_EXPIRY_MINUTES` | No | `1440` | Maximum allowed SAS token lifetime in minutes (ceiling). Requests for `expiryMinutes` (or `expiryHours` converted to minutes) exceeding this value receive a structured `"invalid"` error with `field: "expiryMinutes"` or `field: "expiryHours"`. Default: 1440 (24 hours). Set lower (e.g. `60`) for tighter security. |
+| `SAS_PROTOCOL` | No | `https` | Controls the `spr` (signed protocol) in generated SAS tokens. `"https"` (default) — HTTPS-only, recommended for production. `"https,http"` — allow both; required for **Azurite** / local emulator which serves over plain HTTP. Case-insensitive; `"http,https"` is also accepted. |
 | `RATE_LIMIT_WINDOW_SECONDS` | No | `900` | Rate limit window in seconds (overrides `RATE_LIMIT_WINDOW_MINUTES` when set) |
 | `RATE_LIMIT_MCP_MAX` | No | `3000` | Max requests per window for `/mcp` (JSON-RPC) per identity |
 | `RATE_LIMIT_UPLOAD_MAX` | No | `600` | Max requests per window for `/upload` (multipart) per identity |
