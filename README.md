@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **41 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **42 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed identity, and Bicep infrastructure-as-code.
 
@@ -8,16 +8,18 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
 
 ## Features
 
-- **41 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **42 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
 - **12 MCP resources** — read-only, URI-addressable data for LLM context (listings, content reads, properties)
-- **Direct file upload** — `POST /upload` endpoint for multipart form-data (bypasses base64/JSON-RPC for large files)
+- **Direct file upload** — `POST /upload` endpoint streams multipart form-data to Azure via busboy (no temp files, no full-file buffering)
 - **URL-based upload** — `blob-upload-from-url` tool fetches files server-side (no base64 through LLM context)
 - **Dual-mode transport** — stateful sessions for MCP clients + stateless one-shot for HTTP testing
 - **API key authentication** with constant-time comparison (X-API-Key header or Bearer token)
-- **Rate limiting** — configurable per-IP request limits
+- **Rate limiting** — per-endpoint budgets with API-key-aware identity; configurable window and max requests
 - **Security headers** via Helmet
 - **Session TTL** — automatic cleanup of idle sessions (30 min)
-- **SAS token generation** — blob and container-level shared access signatures
+- **SAS token generation** — blob and container-level shared access signatures with expiry ceiling and protocol control
+- **Tool gating** — `DISABLED_TOOLS` env var to disable specific tools at runtime (omitted from listings; forbidden on invocation)
+- **Server introspection** — `store-info` tool exposes limits, auth mode, endpoints, and disabled tools (no secrets)
 - **Base64 content encoding** — upload/download binary files through JSON
 - **Docker** — multi-stage build, non-root container user
 - **Azure Container Apps** — Bicep IaC, user-assigned managed identity, auto-HTTPS, auto-scaling (1–5 replicas)
@@ -42,11 +44,11 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
                                       └──────────┬───────────────┘
                                                   │
                       ┌───────────────────────────┬┴──────────────────────────┐
-                      │      39 Tools (actions)   │    12 Resources (reads)   │
+                      │      42 Tools (actions)   │    12 Resources (reads)   │
                       ├───────────────────────────┼───────────────────────────┤
-                      │ Blob (12) │ Queue (8)     │ Blob (4)  │ Queue (2)    │
+                      │ Blob (13) │ Queue (8)     │ Blob (4)  │ Queue (2)    │
                       │ Table (5) │ FileShare (8) │ Table (2) │ FileShare (4)│
-                      │ Utility (6)               │                          │
+                      │ Utility (8)               │                          │
                       └───────────┬───────────────┴──────────┬───────────────┘
                                   │                          │
                                   └──────────┬───────────────┘
@@ -133,7 +135,7 @@ mcp-azure-storage/
 
 ## Response Format Option
 
-All 41 tools accept an optional `format` parameter that controls how structured data is returned:
+All 42 tools accept an optional `format` parameter that controls how structured data is returned:
 
 | Value | Description |
 |-------|-------------|
@@ -165,7 +167,7 @@ All 41 tools accept an optional `format` parameter that controls how structured 
 
 ## Structured Error Model
 
-All 41 tools return **structured error JSON** when an operation fails. Instead of plain-text error messages, every error response uses `isError: true` with a single text content item containing a JSON object. This makes errors machine-parseable for automated retry logic, error routing, and client-side handling.
+All 42 tools return **structured error JSON** when an operation fails. Instead of plain-text error messages, every error response uses `isError: true` with a single text content item containing a JSON object. This makes errors machine-parseable for automated retry logic, error routing, and client-side handling.
 
 ### Error Response Shape
 
@@ -1116,7 +1118,7 @@ npm run test:watch
 npm run test:coverage
 ```
 
-**Test coverage:** Config, API key middleware, all 39 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
+**Test coverage:** Config, API key middleware, rate limiting, disabled-tool gating, structured errors, all 42 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
 
 ### Integration Tests (Azurite)
 
@@ -1140,6 +1142,36 @@ This sets `TEST_INTEGRATION=1` and uses the Azurite well-known credentials from 
 
 ```bash
 docker compose -f docker-compose.azurite.yml down
+```
+
+### Running Integration Tests — Advanced Gating
+
+Integration tests use environment-variable gates to control which test suites run. This keeps default CI fast while still allowing heavy or live-Azure tests on demand.
+
+| Gate variable | Default | Effect |
+|---------------|---------|--------|
+| `TEST_INTEGRATION` | `0` (off) | Master gate — set to `1` to enable any integration test. `npm run test:integration` sets this automatically. |
+| `TEST_UPLOAD_LARGE` | `0` (off) | Set to `1` to enable 150+ MiB streaming upload tests. Skipped by default to keep CI under 60 s. |
+| `TEST_AZURE_LIVE` | `0` (off) | Set to `1` to enable tests that require a live Azure Storage account (not Azurite). Also implicitly enables large upload tests. |
+| `TEST_UPLOAD_MB` | `150` | Size in MiB for the large upload test payload. Only used when `TEST_UPLOAD_LARGE=1` or `TEST_AZURE_LIVE=1`. |
+
+**Azurite SAS protocol:** Azurite serves over plain HTTP, so SAS tokens generated with the default `SAS_PROTOCOL=https` will fail validation. Set `SAS_PROTOCOL=https,http` in your `.env.test` or test environment when running SAS-related integration tests against Azurite.
+
+**Endpoint overrides:** Azurite uses non-standard URLs (`http://127.0.0.1:10000/<account>`). The integration test environment configures these via:
+
+```env
+AZURE_BLOB_SERVICE_URL=http://127.0.0.1:10000/devstoreaccount1
+AZURE_QUEUE_SERVICE_URL=http://127.0.0.1:10001/devstoreaccount1
+AZURE_TABLE_SERVICE_URL=http://127.0.0.1:10002/devstoreaccount1
+```
+
+These are already set in [`.env.test`](.env.test). For live Azure tests, unset these overrides so SDK clients connect to the real service endpoints.
+
+**Example — run large upload tests locally:**
+
+```bash
+docker compose -f docker-compose.azurite.yml up -d
+set TEST_INTEGRATION=1&& set TEST_UPLOAD_LARGE=1&& vitest run --config vitest.integration.config.ts
 ```
 
 ### CI / GitHub Actions
@@ -1169,9 +1201,10 @@ tests/
 │   ├── table-resources.test.ts
 │   └── fileshare-resources.test.ts
 └── integration/                  # Real CRUD against Azurite (gated by TEST_INTEGRATION)
-    ├── blob-integration.test.ts
-    ├── queue-integration.test.ts
-    └── table-integration.test.ts
+    ├── blob-integration.test.ts    # Blob CRUD + head + set-tier + versioned reads
+    ├── queue-integration.test.ts   # Queue CRUD + update-message + renew-lease
+    ├── upload-integration.test.ts  # Streaming upload via POST /upload (large tests gated)
+    └── table-integration.test.ts   # Table CRUD smoke test
 ```
 
 ---

@@ -33,6 +33,11 @@ import {
   getCredential,
   getSharedKeyCredential,
   hasSharedKey,
+  resolveSasExpiry,
+  getSasProtocol,
+  validateBlobPermissions,
+  validateContainerPermissions,
+  getBlobServiceBaseUrl,
 } from "../config.js";
 
 /**
@@ -378,12 +383,22 @@ export function registerBlobTools(server: McpServer): void {
 
       if (returnUrl) {
         // Return a SAS URL for direct access (requires shared key)
-        const sasToken = generateBlobSas(
-          containerName,
-          blobName,
-          sasExpiryHours
-        );
-        const url = `https://${config.accountName}.blob.core.windows.net/${containerName}/${blobName}?${sasToken}`;
+        const { expiresOn } = resolveSasExpiry(undefined, sasExpiryHours);
+        const credential = getSharedKeyCredential();
+        const protocol = getSasProtocol();
+        const sasToken = generateBlobSASQueryParameters(
+          {
+            containerName,
+            blobName,
+            permissions: BlobSASPermissions.parse("r"),
+            startsOn: new Date(),
+            expiresOn,
+            protocol,
+          },
+          credential
+        ).toString();
+        const baseUrl = getBlobServiceBaseUrl();
+        const url = `${baseUrl}/${containerName}/${blobName}?${sasToken}`;
         return formatResponse({ url, expiresInHours: sasExpiryHours }, format, "Blob SAS URL");
       }
 
@@ -549,6 +564,10 @@ export function registerBlobTools(server: McpServer): void {
         .optional()
         .default(24)
         .describe("Hours until the SAS token expires (default: 24)"),
+      expiryMinutes: z
+        .number()
+        .optional()
+        .describe("Minutes until the SAS token expires. Takes precedence over expiryHours when both are provided. Must be between 1 and SAS_MAX_EXPIRY_MINUTES (default ceiling: 1440 = 24h)."),
       permissions: z
         .string()
         .optional()
@@ -556,16 +575,28 @@ export function registerBlobTools(server: McpServer): void {
         .describe("SAS permissions string — combine: r=read, w=write, d=delete, l=list (default: 'r')"),
       format: formatSchema,
     },
-    async ({ containerName, blobName, expiryHours, permissions, format }) => {
-      const sasToken = generateBlobSas(
-        containerName,
-        blobName,
-        expiryHours,
-        permissions
-      );
-      const url = `https://${config.accountName}.blob.core.windows.net/${containerName}/${blobName}?${sasToken}`;
-      const expiresOn = new Date();
-      expiresOn.setHours(expiresOn.getHours() + expiryHours);
+    async ({ containerName, blobName, expiryHours, expiryMinutes, permissions, format }) => {
+      // Validate permissions via SDK parser
+      const parsedPermissions = validateBlobPermissions(permissions);
+      // Resolve expiry with ceiling enforcement
+      const { expiresOn } = resolveSasExpiry(expiryMinutes, expiryHours);
+
+      const credential = getSharedKeyCredential();
+      const protocol = getSasProtocol();
+      const sasToken = generateBlobSASQueryParameters(
+        {
+          containerName,
+          blobName,
+          permissions: parsedPermissions,
+          startsOn: new Date(),
+          expiresOn,
+          protocol,
+        },
+        credential
+      ).toString();
+
+      const baseUrl = getBlobServiceBaseUrl();
+      const url = `${baseUrl}/${containerName}/${blobName}?${sasToken}`;
       return formatResponse({ url, sasToken, expiresOn: expiresOn.toISOString() }, format, "Blob SAS URL");
     }
   );
@@ -576,6 +607,10 @@ export function registerBlobTools(server: McpServer): void {
     {
       containerName: z.string().describe("Name of the container to generate the SAS for (e.g. 'my-data-2024')"),
       expiryHours: z.number().optional().default(24).describe("Hours until the SAS token expires (default: 24)"),
+      expiryMinutes: z
+        .number()
+        .optional()
+        .describe("Minutes until the SAS token expires. Takes precedence over expiryHours when both are provided. Must be between 1 and SAS_MAX_EXPIRY_MINUTES (default ceiling: 1440 = 24h)."),
       permissions: z
         .string()
         .optional()
@@ -583,23 +618,27 @@ export function registerBlobTools(server: McpServer): void {
         .describe("SAS permissions string — combine: r=read, l=list, w=write, d=delete (default: 'rl')"),
       format: formatSchema,
     },
-    async ({ containerName, expiryHours, permissions, format }) => {
-      const expiresOn = new Date();
-      expiresOn.setHours(expiresOn.getHours() + expiryHours);
+    async ({ containerName, expiryHours, expiryMinutes, permissions, format }) => {
+      // Validate permissions via SDK parser
+      const parsedPermissions = validateContainerPermissions(permissions);
+      // Resolve expiry with ceiling enforcement
+      const { expiresOn } = resolveSasExpiry(expiryMinutes, expiryHours);
 
       const credential = getSharedKeyCredential();
+      const protocol = getSasProtocol();
       const sasToken = generateBlobSASQueryParameters(
         {
           containerName,
-          permissions: ContainerSASPermissions.parse(permissions),
+          permissions: parsedPermissions,
           startsOn: new Date(),
           expiresOn,
-          protocol: SASProtocol.HttpsAndHttp,
+          protocol,
         },
         credential
       ).toString();
 
-      const connectionString = `DefaultEndpointsProtocol=https;BlobEndpoint=https://${config.accountName}.blob.core.windows.net;SharedAccessSignature=${sasToken}`;
+      const baseUrl = getBlobServiceBaseUrl();
+      const connectionString = `DefaultEndpointsProtocol=https;BlobEndpoint=${baseUrl};SharedAccessSignature=${sasToken}`;
 
       return formatResponse({
         sasToken,
@@ -794,39 +833,9 @@ function assertSafeUrl(url: string): void {
   }
 }
 
-/**
- * Generate a SAS (Shared Access Signature) query string for a specific blob.
- *
- * @param accountName  - Storage account name.
- * @param accountKey   - Storage account shared key.
- * @param containerName - Target container.
- * @param blobName     - Target blob (including virtual directory path).
- * @param expiryHours  - Hours from now until the SAS token expires.
- * @param permissions  - SAS permission string (e.g. "r", "rwd").
- * @returns The SAS query string (without leading '?').
- */
-function generateBlobSas(
-  containerName: string,
-  blobName: string,
-  expiryHours: number,
-  permissions: string = "r"
-): string {
-  const credential = getSharedKeyCredential();
-  const expiresOn = new Date();
-  expiresOn.setHours(expiresOn.getHours() + expiryHours);
-
-  return generateBlobSASQueryParameters(
-    {
-      containerName,
-      blobName,
-      permissions: BlobSASPermissions.parse(permissions),
-      startsOn: new Date(),
-      expiresOn,
-      protocol: SASProtocol.HttpsAndHttp,
-    },
-    credential
-  ).toString();
-}
+// generateBlobSas helper removed — SAS generation now uses shared helpers
+// from config.ts (resolveSasExpiry, getSasProtocol, validateBlobPermissions,
+// getBlobServiceBaseUrl) directly in each tool handler for consistency.
 
 /**
  * Collect a Node.js readable stream into a single Buffer.

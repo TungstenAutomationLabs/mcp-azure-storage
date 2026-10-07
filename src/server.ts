@@ -50,6 +50,18 @@ import { registerBlobResources } from "./resources/blob-resources.js";
 import { registerFileShareResources } from "./resources/fileshare-resources.js";
 import { registerQueueResources } from "./resources/queue-resources.js";
 import { registerTableResources } from "./resources/table-resources.js";
+import { parseDisabledTools, buildDisabledToolError } from "./utils/disabled-tools.js";
+
+// Re-export for backward compatibility (tests, external consumers)
+export { parseDisabledTools, buildDisabledToolError } from "./utils/disabled-tools.js";
+
+// ── Disabled tools ───────────────────────────────────────────────────────────
+// DISABLED_TOOLS env var: comma-separated tool names (case-insensitive) to
+// exclude from registration and reject on invocation. Empty/undefined = no
+// tools disabled.
+
+/** Canonical set of disabled tool names (lowercase) parsed once at startup. */
+export const disabledToolNames = parseDisabledTools(process.env.DISABLED_TOOLS);
 
 // ── Express application ──────────────────────────────────────────────────────
 const app = express();
@@ -249,12 +261,17 @@ app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
 // ── MCP server factory ───────────────────────────────────────────────────────
 
 /**
- * Create a fresh MCP server instance with all 37 tools and 12 resources.
+ * Create a fresh MCP server instance with all tools and resources.
  *
  * A new instance is created for each stateful session and each stateless
  * request. Tool and resource registrations read the shared singleton
  * StorageConfig and SDK clients from their respective modules, so this
  * is lightweight.
+ *
+ * When DISABLED_TOOLS is configured, disabled tool names are silently
+ * skipped during registration. The `disabledToolNames` set is used by
+ * the pre-dispatch guard in the POST /mcp handler to reject calls to
+ * disabled tools with a structured forbidden error.
  *
  * @returns A fully-configured McpServer ready to connect to a transport.
  */
@@ -271,7 +288,27 @@ function createMcpServer(): McpServer {
   // JSON string as the text content. Must be called before tool registration.
   wrapToolErrorHandler(server);
 
-  // ── Tools (35 total) — actions that read or mutate storage ──
+  // ── Disabled-tool gating layer ─────────────────────────────────────────
+  // If DISABLED_TOOLS is configured, wrap server.tool() a second time
+  // (after the error wrapper) to silently skip registration for any tool
+  // whose name appears in the disabled set. This means disabled tools are
+  // never registered, so they don't appear in tools/list and can't be
+  // invoked through the MCP SDK path. The pre-dispatch guard in the POST
+  // /mcp handler provides a belt-and-suspenders safeguard.
+  if (disabledToolNames.size > 0) {
+    const origTool = server.tool.bind(server);
+    (server as any).tool = function gatedTool(...args: unknown[]) {
+      // The first argument is always the tool name (string).
+      const toolName = args[0];
+      if (typeof toolName === "string" && disabledToolNames.has(toolName.toLowerCase())) {
+        // Skip registration entirely — tool will not appear in tools/list
+        return;
+      }
+      return (origTool as Function).apply(server, args);
+    };
+  }
+
+  // ── Tools — actions that read or mutate storage ──
   registerBlobTools(server);
   registerTableTools(server);
   registerQueueTools(server);
@@ -285,6 +322,45 @@ function createMcpServer(): McpServer {
   registerTableResources(server);
 
   return server;
+}
+
+// ── Startup validation: warn on unknown disabled tool names ──────────────────
+// Runs once after the first createMcpServer() call to discover the full set of
+// registered tool names, then compares against DISABLED_TOOLS. Unknown names
+// are logged as warnings but do not prevent server startup.
+let _disabledToolsValidated = false;
+
+function validateDisabledToolNames(): void {
+  if (_disabledToolsValidated || disabledToolNames.size === 0) return;
+  _disabledToolsValidated = true;
+
+  // Create a temporary server with NO disabled gating to discover all known tools.
+  const tempServer = new McpServer({ name: "tool-discovery", version: "0.0.0" });
+  wrapToolErrorHandler(tempServer);
+  registerBlobTools(tempServer);
+  registerTableTools(tempServer);
+  registerQueueTools(tempServer);
+  registerFileShareTools(tempServer);
+  registerUtilityTools(tempServer);
+
+  // Extract registered tool names from the internal _registeredTools map.
+  // The MCP SDK stores tools in a Map<string, RegisteredTool>.
+  const knownTools = new Set<string>();
+  const registeredToolsMap = (tempServer as any)._registeredTools;
+  if (registeredToolsMap instanceof Map) {
+    for (const name of registeredToolsMap.keys()) {
+      knownTools.add((name as string).toLowerCase());
+    }
+  }
+
+  for (const disabled of disabledToolNames) {
+    if (!knownTools.has(disabled)) {
+      console.warn(`⚠️  DISABLED_TOOLS contains unknown tool name: '${disabled}'`);
+    }
+  }
+
+  // Clean up temp server
+  try { tempServer.close(); } catch { /* ignore */ }
 }
 
 // ── Session management for stateful mode ─────────────────────────────────────
@@ -341,6 +417,30 @@ app.use("/mcp", mcpLimiter);
 // ══════════════════════════════════════════════════════════════════════════════
 app.post("/mcp", async (req: Request, res: Response) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+  // ─── Pre-dispatch guard: reject calls to disabled tools ───
+  // Check before any session routing so disabled tools are rejected consistently
+  // regardless of stateful/stateless mode. Only applies to tools/call requests.
+  if (disabledToolNames.size > 0) {
+    const body = req.body;
+    const isToolCall = body?.method === "tools/call";
+    if (isToolCall) {
+      const targetTool = body?.params?.name;
+      if (typeof targetTool === "string" && disabledToolNames.has(targetTool.toLowerCase())) {
+        const forbidden = buildDisabledToolError(targetTool);
+        res.status(403).json({
+          jsonrpc: "2.0",
+          id: body?.id ?? null,
+          error: {
+            code: -32603,
+            message: forbidden.error,
+            data: forbidden.data,
+          },
+        });
+        return;
+      }
+    }
+  }
 
   // ─── Route to existing session ───
   if (sessionId && sessions.has(sessionId)) {
@@ -977,7 +1077,14 @@ const httpServer = app.listen(PORT, () => {
   console.log(`   Max sessions : ${MAX_SESSIONS}`);
   console.log(`   SSE keepalive: ${SSE_KEEPALIVE_INTERVAL_MS / 1000}s`);
   console.log(`   JSON limit   : ${(MAX_JSON_BODY_BYTES / (1024 * 1024)).toFixed(0)}mb`);
-  console.log(`   Upload limit : ${(MAX_UPLOAD_BYTES / (1024 * 1024)).toFixed(0)}mb (streaming to Azure)\n`);
+  console.log(`   Upload limit : ${(MAX_UPLOAD_BYTES / (1024 * 1024)).toFixed(0)}mb (streaming to Azure)`);
+  if (disabledToolNames.size > 0) {
+    console.log(`   Disabled tools: ${[...disabledToolNames].join(", ")}`);
+  }
+  console.log(""); // trailing newline
+
+  // Validate DISABLED_TOOLS names against known tools (logs warnings for unknowns)
+  validateDisabledToolNames();
 });
 
 // ── Graceful shutdown ────────────────────────────────────────────────────────

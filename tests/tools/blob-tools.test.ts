@@ -5,7 +5,7 @@
  * Tests tool registration and handler behaviour via the MCP test harness.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Readable } from "stream";
 
 // ── Mock Azure Storage Blob SDK ──────────────────────────────────────────
@@ -69,11 +69,28 @@ vi.mock("@azure/storage-blob", () => {
       })),
     })),
     generateBlobSASQueryParameters: vi.fn().mockReturnValue({
-      toString: () => "sv=2023-01-01&sig=fakesig",
+      toString: () => "sv=2023-01-01&sig=fakesig&spr=https",
     }),
-    BlobSASPermissions: { parse: vi.fn().mockReturnValue({}) },
-    ContainerSASPermissions: { parse: vi.fn().mockReturnValue({}) },
-    SASProtocol: { HttpsAndHttp: "https,http" },
+    BlobSASPermissions: {
+      parse: vi.fn().mockImplementation((perm: string) => {
+        // Mimic SDK validation: throw for clearly invalid characters
+        const validChars = /^[racwdxtmeopiyl]*$/;
+        if (!validChars.test(perm)) {
+          throw new Error(`Invalid permission character in "${perm}"`);
+        }
+        return {};
+      }),
+    },
+    ContainerSASPermissions: {
+      parse: vi.fn().mockImplementation((perm: string) => {
+        const validChars = /^[racwdxltmeopiyl]*$/;
+        if (!validChars.test(perm)) {
+          throw new Error(`Invalid permission character in "${perm}"`);
+        }
+        return {};
+      }),
+    },
+    SASProtocol: { HttpsAndHttp: "https,http", Https: "https" },
   };
 });
 
@@ -87,6 +104,8 @@ import {
   extractToolsList,
 } from "../helpers/mcp-test-harness.js";
 import { registerBlobTools } from "../../src/tools/blob-tools.js";
+import { _resetConfigForTesting } from "../../src/config.js";
+import { generateBlobSASQueryParameters } from "@azure/storage-blob";
 
 function createBlobTestApp() {
   return createTestApp((server) => registerBlobTools(server));
@@ -967,6 +986,258 @@ describe("blob-tools", () => {
       expect(data.url).toContain("test/file.pdf");
       expect(data.sasToken).toBeDefined();
       expect(data.expiresOn).toBeDefined();
+    });
+
+    // ── v1.1 Item 7: expiryMinutes with ceiling ────────────────────────
+    describe("expiryMinutes and ceiling", () => {
+      const savedEnv: Record<string, string | undefined> = {};
+
+      beforeEach(() => {
+        savedEnv.SAS_MAX_EXPIRY_MINUTES = process.env.SAS_MAX_EXPIRY_MINUTES;
+        savedEnv.SAS_PROTOCOL = process.env.SAS_PROTOCOL;
+        savedEnv.AZURE_BLOB_SERVICE_URL = process.env.AZURE_BLOB_SERVICE_URL;
+      });
+
+      afterEach(() => {
+        for (const [key, val] of Object.entries(savedEnv)) {
+          if (val !== undefined) process.env[key] = val;
+          else delete process.env[key];
+        }
+        _resetConfigForTesting();
+      });
+
+      it("succeeds when expiryMinutes is within ceiling", async () => {
+        process.env.SAS_MAX_EXPIRY_MINUTES = "60";
+        _resetConfigForTesting();
+
+        const app = createBlobTestApp();
+        const res = await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            expiryMinutes: 30,
+            permissions: "r",
+          })
+        ).expect(200);
+
+        const data = extractToolJson(res);
+        expect(data.url).toContain("test/file.pdf");
+        expect(data.sasToken).toBeDefined();
+        expect(data.expiresOn).toBeDefined();
+      });
+
+      it("returns structured invalid error when expiryMinutes exceeds ceiling", async () => {
+        process.env.SAS_MAX_EXPIRY_MINUTES = "30";
+        _resetConfigForTesting();
+
+        const app = createBlobTestApp();
+        const res = await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            expiryMinutes: 60,
+            permissions: "r",
+          })
+        ).expect(200);
+
+        const text = extractToolText(res);
+        expect(text).toContain("exceeds maximum");
+        expect(text).toContain("30 minutes");
+      });
+
+      it("returns structured invalid error when expiryHours exceeds ceiling (converted to minutes)", async () => {
+        process.env.SAS_MAX_EXPIRY_MINUTES = "30";
+        _resetConfigForTesting();
+
+        const app = createBlobTestApp();
+        const res = await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            expiryHours: 1,
+            permissions: "r",
+          })
+        ).expect(200);
+
+        const text = extractToolText(res);
+        expect(text).toContain("exceeds maximum");
+        expect(text).toContain("30 minutes");
+      });
+
+      it("expiryMinutes takes precedence over expiryHours", async () => {
+        process.env.SAS_MAX_EXPIRY_MINUTES = "1440";
+        _resetConfigForTesting();
+
+        const app = createBlobTestApp();
+        const res = await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            expiryMinutes: 10,
+            expiryHours: 24,
+            permissions: "r",
+          })
+        ).expect(200);
+
+        const data = extractToolJson(res);
+        // If expiryMinutes=10 took precedence, the expiresOn should be ~10 minutes
+        // from now, not 24 hours
+        const expiresOn = new Date(data.expiresOn);
+        const diffMs = expiresOn.getTime() - Date.now();
+        // Should be roughly 10 minutes (600s), definitely less than 1 hour
+        expect(diffMs).toBeLessThan(60 * 60 * 1000);
+        expect(diffMs).toBeGreaterThan(0);
+      });
+    });
+
+    // ── v1.1 Item 7: SAS_PROTOCOL (spr query) ─────────────────────────
+    describe("SAS protocol selection", () => {
+      const savedEnv: Record<string, string | undefined> = {};
+
+      beforeEach(() => {
+        savedEnv.SAS_PROTOCOL = process.env.SAS_PROTOCOL;
+      });
+
+      afterEach(() => {
+        if (savedEnv.SAS_PROTOCOL !== undefined) process.env.SAS_PROTOCOL = savedEnv.SAS_PROTOCOL;
+        else delete process.env.SAS_PROTOCOL;
+        _resetConfigForTesting();
+      });
+
+      it("uses SASProtocol.Https when SAS_PROTOCOL=https (default)", async () => {
+        process.env.SAS_PROTOCOL = "https";
+        _resetConfigForTesting();
+
+        const app = createBlobTestApp();
+        await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            permissions: "r",
+          })
+        ).expect(200);
+
+        // Verify generateBlobSASQueryParameters was called with protocol: "https"
+        expect(generateBlobSASQueryParameters).toHaveBeenCalledWith(
+          expect.objectContaining({ protocol: "https" }),
+          expect.anything()
+        );
+      });
+
+      it("uses SASProtocol.HttpsAndHttp when SAS_PROTOCOL=https,http", async () => {
+        process.env.SAS_PROTOCOL = "https,http";
+        _resetConfigForTesting();
+
+        const app = createBlobTestApp();
+        await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            permissions: "r",
+          })
+        ).expect(200);
+
+        expect(generateBlobSASQueryParameters).toHaveBeenCalledWith(
+          expect.objectContaining({ protocol: "https,http" }),
+          expect.anything()
+        );
+      });
+    });
+
+    // ── v1.1 Item 7: Permission validation ─────────────────────────────
+    describe("permission validation", () => {
+      it("returns structured invalid error for invalid permission characters", async () => {
+        const app = createBlobTestApp();
+        const res = await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            permissions: "rz!",
+          })
+        ).expect(200);
+
+        const text = extractToolText(res);
+        expect(text).toContain("Invalid");
+        expect(text).toContain("permissions");
+      });
+
+      it("accepts valid permission subsets (rwd)", async () => {
+        const app = createBlobTestApp();
+        const res = await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            permissions: "rwd",
+          })
+        ).expect(200);
+
+        const data = extractToolJson(res);
+        expect(data.url).toContain("test/file.pdf");
+        expect(data.sasToken).toBeDefined();
+      });
+    });
+
+    // ── v1.1 Item 7: Endpoint host builder ─────────────────────────────
+    describe("endpoint host builder", () => {
+      const savedEnv: Record<string, string | undefined> = {};
+
+      beforeEach(() => {
+        savedEnv.AZURE_BLOB_SERVICE_URL = process.env.AZURE_BLOB_SERVICE_URL;
+      });
+
+      afterEach(() => {
+        if (savedEnv.AZURE_BLOB_SERVICE_URL !== undefined) {
+          process.env.AZURE_BLOB_SERVICE_URL = savedEnv.AZURE_BLOB_SERVICE_URL;
+        } else {
+          delete process.env.AZURE_BLOB_SERVICE_URL;
+        }
+        _resetConfigForTesting();
+      });
+
+      it("uses Azurite endpoint override when AZURE_BLOB_SERVICE_URL is set", async () => {
+        process.env.AZURE_BLOB_SERVICE_URL = "http://127.0.0.1:10000/devstoreaccount1";
+        _resetConfigForTesting();
+
+        const app = createBlobTestApp();
+        const res = await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            permissions: "r",
+          })
+        ).expect(200);
+
+        const data = extractToolJson(res);
+        expect(data.url).toContain("127.0.0.1:10000");
+        expect(data.url).toContain("devstoreaccount1");
+      });
+
+      it("uses default Azure endpoint when AZURE_BLOB_SERVICE_URL is not set", async () => {
+        delete process.env.AZURE_BLOB_SERVICE_URL;
+        _resetConfigForTesting();
+
+        const app = createBlobTestApp();
+        const res = await mcpPost(
+          app,
+          toolCallRequest("blob-get-sas-url", {
+            containerName: "test",
+            blobName: "file.pdf",
+            permissions: "r",
+          })
+        ).expect(200);
+
+        const data = extractToolJson(res);
+        expect(data.url).toContain("blob.core.windows.net");
+      });
     });
   });
 
