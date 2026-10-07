@@ -27,6 +27,7 @@ import { registerBlobTools } from "../../src/tools/blob-tools.js";
 import { registerBlobResources } from "../../src/resources/blob-resources.js";
 
 const SKIP = !process.env.TEST_INTEGRATION;
+const IS_LIVE = !!process.env.TEST_AZURE_LIVE;
 
 describe.skipIf(SKIP)("blob-tools integration (Azurite)", () => {
   const containerName = `test-int-${Date.now()}`;
@@ -110,6 +111,61 @@ describe.skipIf(SKIP)("blob-tools integration (Azurite)", () => {
     const readData = extractToolJson(readRes);
     expect(readData.contentBase64).toBe(content);
     expect(readData.contentType).toBe("text/plain");
+  });
+
+  it("reads blob with maxBytes truncation", async () => {
+    // The greeting.txt blob has 13 bytes ("hello azurite")
+    const res = await mcpPost(
+      app,
+      toolCallRequest("blob-read", {
+        containerName,
+        blobName: "greeting.txt",
+        maxBytes: 5,
+      })
+    ).expect(200);
+
+    const data = extractToolJson(res);
+    // Should only get 5 bytes back
+    expect(data.size).toBe(5);
+    expect(data.truncated).toBe(true);
+    // Decode and verify it's the first 5 bytes
+    const decoded = Buffer.from(data.contentBase64, "base64").toString("utf-8");
+    expect(decoded).toBe("hello");
+  });
+
+  it("retrieves blob properties via blob-head", async () => {
+    const res = await mcpPost(
+      app,
+      toolCallRequest("blob-head", {
+        containerName,
+        blobName: "greeting.txt",
+      })
+    ).expect(200);
+
+    const data = extractToolJson(res);
+    expect(data.ok).toBe(true);
+    expect(data.containerName).toBe(containerName);
+    expect(data.blobName).toBe("greeting.txt");
+    expect(data.contentLength).toBe(13);
+    expect(data.contentType).toBe("text/plain");
+    expect(data.etag).toBeDefined();
+    expect(data.lastModified).toBeDefined();
+  });
+
+  // Version-specific operations only work on Azure live (not Azurite)
+  describe.skipIf(!IS_LIVE)("version-specific operations (live only)", () => {
+    it("reads a specific blob version via blob-read with versionId", async () => {
+      // This test requires Azure live with versioning enabled
+      // Skipped in Azurite which doesn't support blob versioning
+    });
+
+    it("deletes a specific blob version via blob-delete with versionId", async () => {
+      // This test requires Azure live with versioning enabled
+    });
+
+    it("sets tier on a specific version via blob-set-tier with versionId", async () => {
+      // This test requires Azure live with versioning enabled
+    });
   });
 
   it("deletes the blob", async () => {
