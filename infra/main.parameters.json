@@ -19,6 +19,9 @@
     },
     "enableLifecyclePolicy": {
       "value": "${ENABLE_LIFECYCLE_POLICY=false}"
+    },
+    "disabledTools": {
+      "value": "${DISABLED_TOOLS=}"
     }
   }
 }

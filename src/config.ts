@@ -28,6 +28,8 @@
  *  - `AZURE_USE_MANAGED_IDENTITY` — set to "true" to use DefaultAzureCredential
  *  - `SAS_EXPIRY_HOURS`           — default SAS token lifetime in hours (default: 24)
  *  - `SAS_DEFAULT_PERMISSIONS`    — default SAS permission string (default: "rl")
+ *  - `SAS_MAX_EXPIRY_MINUTES`     — ceiling for SAS token lifetime in minutes (default: 1440 = 24h)
+ *  - `SAS_PROTOCOL`               — SAS protocol: "https" (default) or "https,http" (for Azurite)
  *  - `AZURE_BLOB_SERVICE_URL`     — override Blob service URL (for Azurite or emulator)
  *  - `AZURE_QUEUE_SERVICE_URL`    — override Queue service URL (for Azurite or emulator)
  *  - `AZURE_TABLE_SERVICE_URL`    — override Table service URL (for Azurite or emulator)
@@ -36,8 +38,16 @@
  * @module config
  */
 
-import { StorageSharedKeyCredential } from "@azure/storage-blob";
+import {
+  StorageSharedKeyCredential,
+  BlobSASPermissions,
+  ContainerSASPermissions,
+  SASProtocol,
+} from "@azure/storage-blob";
 import type { TokenCredential } from "@azure/identity";
+
+/** Allowed SAS protocol values (normalised to lowercase). */
+export type SasProtocolValue = "https" | "https,http";
 
 /** Shape of the cached storage configuration. */
 export interface StorageConfig {
@@ -54,6 +64,10 @@ export interface StorageConfig {
   sasExpiryHours: number;
   /** Default SAS permission string (from env or "rl"). */
   sasDefaultPermissions: string;
+  /** Maximum allowed SAS token lifetime in minutes (from env or 1440). */
+  sasMaxExpiryMinutes: number;
+  /** SAS protocol selection: "https" or "https,http" (from env or "https"). */
+  sasProtocol: SasProtocolValue;
   /**
    * Optional endpoint URL overrides for local emulators (Azurite).
    * When set, SDK clients use these URLs instead of constructing from accountName.
@@ -101,12 +115,25 @@ export function getStorageConfig(): StorageConfig {
     );
   }
 
+  // Parse SAS_MAX_EXPIRY_MINUTES (default 1440 = 24h, minimum 1)
+  const rawMaxExpiry = parseInt(process.env.SAS_MAX_EXPIRY_MINUTES || "1440", 10);
+  const sasMaxExpiryMinutes = isNaN(rawMaxExpiry) || rawMaxExpiry < 1 ? 1440 : rawMaxExpiry;
+
+  // Parse SAS_PROTOCOL (default "https"; allow "https,http" for Azurite)
+  const rawProtocol = (process.env.SAS_PROTOCOL || "https").toLowerCase().trim();
+  const sasProtocol: SasProtocolValue =
+    rawProtocol === "https,http" || rawProtocol === "http,https"
+      ? "https,http"
+      : "https";
+
   _config = {
     accountName,
     accountKey,
     useManagedIdentity,
     sasExpiryHours: parseInt(process.env.SAS_EXPIRY_HOURS || "24", 10),
     sasDefaultPermissions: process.env.SAS_DEFAULT_PERMISSIONS || "rl",
+    sasMaxExpiryMinutes,
+    sasProtocol,
     blobServiceUrl: process.env.AZURE_BLOB_SERVICE_URL || undefined,
     queueServiceUrl: process.env.AZURE_QUEUE_SERVICE_URL || undefined,
     tableServiceUrl: process.env.AZURE_TABLE_SERVICE_URL || undefined,
@@ -171,6 +198,156 @@ export async function getCredential(): Promise<StorageSharedKeyCredential | Toke
   }
 
   return new StorageSharedKeyCredential(config.accountName, config.accountKey);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SAS HELPERS — shared logic for expiry, protocol, permissions, and URL building
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Result of resolving SAS expiry from expiryMinutes / expiryHours inputs.
+ */
+export interface ResolvedSasExpiry {
+  /** Resolved expiry duration in minutes. */
+  minutes: number;
+  /** Absolute Date when the SAS token expires. */
+  expiresOn: Date;
+}
+
+/**
+ * Resolve the effective SAS expiry in minutes from optional expiryMinutes
+ * and expiryHours inputs, enforcing the configured ceiling.
+ *
+ * Priority: expiryMinutes > expiryHours > config.sasExpiryHours (as minutes).
+ *
+ * Throws an InvalidArgumentError if the resolved value exceeds
+ * `SAS_MAX_EXPIRY_MINUTES` or is less than 1.
+ *
+ * @param expiryMinutes - Optional expiry in minutes (takes precedence).
+ * @param expiryHours   - Optional expiry in hours (fallback).
+ * @returns Resolved minutes and absolute expiry Date.
+ * @throws {Error} (name: InvalidArgumentError) if out of bounds.
+ */
+export function resolveSasExpiry(
+  expiryMinutes?: number,
+  expiryHours?: number,
+): ResolvedSasExpiry {
+  const config = getStorageConfig();
+  const ceiling = config.sasMaxExpiryMinutes;
+
+  let minutes: number;
+  let source: string;
+  if (expiryMinutes != null) {
+    minutes = expiryMinutes;
+    source = "expiryMinutes";
+  } else if (expiryHours != null) {
+    minutes = expiryHours * 60;
+    source = "expiryHours";
+  } else {
+    minutes = config.sasExpiryHours * 60;
+    source = "SAS_EXPIRY_HOURS default";
+  }
+
+  if (minutes < 1) {
+    const err = new Error(
+      `${source} must be at least 1 minute (got ${minutes}).`
+    ) as Error & { name: string; code: string; field: string };
+    err.name = "InvalidArgumentError";
+    err.code = "ERR_INVALID_ARG";
+    err.field = expiryMinutes != null ? "expiryMinutes" : "expiryHours";
+    throw err;
+  }
+
+  if (minutes > ceiling) {
+    const err = new Error(
+      `${source} exceeds maximum allowed SAS expiry of ${ceiling} minutes (got ${minutes}).`
+    ) as Error & { name: string; code: string; field: string };
+    err.name = "InvalidArgumentError";
+    err.code = "ERR_INVALID_ARG";
+    err.field = expiryMinutes != null ? "expiryMinutes" : "expiryHours";
+    throw err;
+  }
+
+  const expiresOn = new Date();
+  expiresOn.setMinutes(expiresOn.getMinutes() + minutes);
+  return { minutes, expiresOn };
+}
+
+/**
+ * Map the configured SAS protocol to the Azure SDK `SASProtocol` enum.
+ *
+ * @returns `SASProtocol.Https` or `SASProtocol.HttpsAndHttp`.
+ */
+export function getSasProtocol(): SASProtocol {
+  const config = getStorageConfig();
+  return config.sasProtocol === "https,http"
+    ? SASProtocol.HttpsAndHttp
+    : SASProtocol.Https;
+}
+
+/**
+ * Validate a SAS permissions string for blob-level operations using the
+ * Azure SDK `BlobSASPermissions.parse()`. Throws a structured invalid error
+ * if the string is malformed or contains unsupported characters.
+ *
+ * @param permissions - The raw permissions string (e.g. "r", "rwd").
+ * @returns The parsed `BlobSASPermissions` object.
+ * @throws {Error} (name: InvalidArgumentError) if parsing fails.
+ */
+export function validateBlobPermissions(permissions: string): BlobSASPermissions {
+  try {
+    return BlobSASPermissions.parse(permissions);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const err = new Error(
+      `Invalid blob SAS permissions "${permissions}": ${msg}`
+    ) as Error & { name: string; code: string; field: string };
+    err.name = "InvalidArgumentError";
+    err.code = "ERR_INVALID_ARG";
+    err.field = "permissions";
+    throw err;
+  }
+}
+
+/**
+ * Validate a SAS permissions string for container-level operations using the
+ * Azure SDK `ContainerSASPermissions.parse()`. Throws a structured invalid error
+ * if the string is malformed or contains unsupported characters.
+ *
+ * @param permissions - The raw permissions string (e.g. "rl", "rwdl").
+ * @returns The parsed `ContainerSASPermissions` object.
+ * @throws {Error} (name: InvalidArgumentError) if parsing fails.
+ */
+export function validateContainerPermissions(permissions: string): ContainerSASPermissions {
+  try {
+    return ContainerSASPermissions.parse(permissions);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const err = new Error(
+      `Invalid container SAS permissions "${permissions}": ${msg}`
+    ) as Error & { name: string; code: string; field: string };
+    err.name = "InvalidArgumentError";
+    err.code = "ERR_INVALID_ARG";
+    err.field = "permissions";
+    throw err;
+  }
+}
+
+/**
+ * Build the base blob service URL, honouring configured endpoint overrides.
+ *
+ * When `AZURE_BLOB_SERVICE_URL` is set (e.g. for Azurite), returns that URL.
+ * Otherwise constructs the standard `https://<accountName>.blob.core.windows.net`.
+ *
+ * @returns The blob service base URL (no trailing slash).
+ */
+export function getBlobServiceBaseUrl(): string {
+  const config = getStorageConfig();
+  if (config.blobServiceUrl) {
+    // Remove trailing slash if present for consistent URL composition
+    return config.blobServiceUrl.replace(/\/+$/, "");
+  }
+  return `https://${config.accountName}.blob.core.windows.net`;
 }
 
 /**

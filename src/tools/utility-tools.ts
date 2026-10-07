@@ -1,5 +1,5 @@
 /**
- * Utility MCP tools — 7 tools.
+ * Utility MCP tools — 8 tools.
  *
  * Provides helper operations that support the primary storage tools:
  *  - Base64 encoding/decoding — required for text↔base64 conversion when
@@ -10,6 +10,8 @@
  *    Azure Storage container names.
  *  - Upload info — returns the direct file upload endpoint URL and instructions
  *    (advertises the /upload REST endpoint to MCP clients).
+ *  - Store info — read-only snapshot of server/runtime configuration, limits,
+ *    disabled tools, and capabilities for client self-calibration.
  *
  * @module tools/utility-tools
  */
@@ -23,10 +25,19 @@ import {
   ContainerSASPermissions,
   SASProtocol,
 } from "@azure/storage-blob";
-import { getStorageConfig, getSharedKeyCredential } from "../config.js";
+import {
+  getStorageConfig,
+  getSharedKeyCredential,
+  resolveSasExpiry,
+  getSasProtocol,
+  validateBlobPermissions,
+  validateContainerPermissions,
+  getBlobServiceBaseUrl,
+} from "../config.js";
+import { parseDisabledTools } from "../utils/disabled-tools.js";
 
 /**
- * Register all 7 utility tools on the given MCP server.
+ * Register all 8 utility tools on the given MCP server.
  *
  * These tools are stateless helpers — they don't maintain any persistent
  * client connections (SAS generation uses short-lived credential objects).
@@ -101,6 +112,10 @@ export function registerUtilityTools(server: McpServer): void {
         .optional()
         .default(24)
         .describe("Hours until the new SAS token expires (default: 24)"),
+      expiryMinutes: z
+        .number()
+        .optional()
+        .describe("Minutes until the SAS token expires. Takes precedence over expiryHours when both are provided. Must be between 1 and SAS_MAX_EXPIRY_MINUTES (default ceiling: 1440 = 24h)."),
       permissions: z
         .string()
         .optional()
@@ -108,24 +123,28 @@ export function registerUtilityTools(server: McpServer): void {
         .describe("SAS permissions string — combine: r=read, w=write, d=delete, l=list (default: 'r')"),
       format: formatSchema,
     },
-    async ({ containerName, blobName, expiryHours, permissions, format }) => {
-      const credential = getSharedKeyCredential();
-      const expiresOn = new Date();
-      expiresOn.setHours(expiresOn.getHours() + expiryHours);
+    async ({ containerName, blobName, expiryHours, expiryMinutes, permissions, format }) => {
+      // Validate permissions via SDK parser
+      const parsedPermissions = validateBlobPermissions(permissions);
+      // Resolve expiry with ceiling enforcement
+      const { expiresOn } = resolveSasExpiry(expiryMinutes, expiryHours);
 
+      const credential = getSharedKeyCredential();
+      const protocol = getSasProtocol();
       const sasToken = generateBlobSASQueryParameters(
         {
           containerName,
           blobName,
-          permissions: BlobSASPermissions.parse(permissions),
+          permissions: parsedPermissions,
           startsOn: new Date(),
           expiresOn,
-          protocol: SASProtocol.HttpsAndHttp,
+          protocol,
         },
         credential
       ).toString();
 
-      const url = `https://${config.accountName}.blob.core.windows.net/${containerName}/${blobName}?${sasToken}`;
+      const baseUrl = getBlobServiceBaseUrl();
+      const url = `${baseUrl}/${containerName}/${blobName}?${sasToken}`;
 
       return formatResponse({
         url,
@@ -146,6 +165,10 @@ export function registerUtilityTools(server: McpServer): void {
         .optional()
         .default(24)
         .describe("Hours until the new SAS token expires (default: 24)"),
+      expiryMinutes: z
+        .number()
+        .optional()
+        .describe("Minutes until the SAS token expires. Takes precedence over expiryHours when both are provided. Must be between 1 and SAS_MAX_EXPIRY_MINUTES (default ceiling: 1440 = 24h)."),
       permissions: z
         .string()
         .optional()
@@ -153,23 +176,27 @@ export function registerUtilityTools(server: McpServer): void {
         .describe("SAS permissions string — combine: r=read, l=list, w=write, d=delete (default: 'rl')"),
       format: formatSchema,
     },
-    async ({ containerName, expiryHours, permissions, format }) => {
-      const credential = getSharedKeyCredential();
-      const expiresOn = new Date();
-      expiresOn.setHours(expiresOn.getHours() + expiryHours);
+    async ({ containerName, expiryHours, expiryMinutes, permissions, format }) => {
+      // Validate permissions via SDK parser
+      const parsedPermissions = validateContainerPermissions(permissions);
+      // Resolve expiry with ceiling enforcement
+      const { expiresOn } = resolveSasExpiry(expiryMinutes, expiryHours);
 
+      const credential = getSharedKeyCredential();
+      const protocol = getSasProtocol();
       const sasToken = generateBlobSASQueryParameters(
         {
           containerName,
-          permissions: ContainerSASPermissions.parse(permissions),
+          permissions: parsedPermissions,
           startsOn: new Date(),
           expiresOn,
-          protocol: SASProtocol.HttpsAndHttp,
+          protocol,
         },
         credential
       ).toString();
 
-      const connectionString = `DefaultEndpointsProtocol=https;BlobEndpoint=https://${config.accountName}.blob.core.windows.net;SharedAccessSignature=${sasToken}`;
+      const baseUrl = getBlobServiceBaseUrl();
+      const connectionString = `DefaultEndpointsProtocol=https;BlobEndpoint=${baseUrl};SharedAccessSignature=${sasToken}`;
 
       return formatResponse({
         containerName,
@@ -281,6 +308,96 @@ export function registerUtilityTools(server: McpServer): void {
       );
     }
   );
+
+  // ── STORE INFO ──────────────────────────────────────────────────────────────
+  // Read-only snapshot of server/runtime configuration and capabilities.
+  // Intended for clients to self-calibrate limits and discover capabilities
+  // without making network calls or probing individual tools.
+
+  server.tool(
+    "store-info",
+    "Read-only snapshot of server runtime configuration, limits, disabled tools, auth mode, " +
+      "and capabilities. Use this to discover upload/body size limits, SAS expiry ceilings, " +
+      "which tools are disabled, and how the server authenticates to Azure Storage. " +
+      "No secrets or tokens are included. Returns JSON with 'ok', 'limits', 'sas', " +
+      "'disabledTools', 'auth', 'endpoints', and 'capabilities'.",
+    {
+      format: formatSchema,
+    },
+    async ({ format }) => {
+      const cfg = getStorageConfig();
+
+      // ── Limits (from env or defaults) ──
+      const maxUploadBytes = toPositiveInt(process.env.MAX_UPLOAD_BYTES, 5368709120);
+      const maxJsonBodyBytes = toPositiveInt(process.env.MAX_JSON_BODY_BYTES, 52428800);
+      const sasMaxExpiryMinutes = cfg.sasMaxExpiryMinutes;
+
+      // ── SAS protocol (normalized) ──
+      const protocol: "https" | "https,http" = cfg.sasProtocol;
+
+      // ── Disabled tools (canonical lower-case, deduplicated) ──
+      const disabledSet = parseDisabledTools(process.env.DISABLED_TOOLS);
+      const disabledTools = [...disabledSet].sort();
+
+      // ── Auth mode detection ──
+      const hasKey = cfg.accountKey.length > 0;
+      const usesMI = cfg.useManagedIdentity;
+      let authMode: "managed_identity" | "shared_key" | "dual";
+      if (hasKey && usesMI) {
+        authMode = "dual";
+      } else if (usesMI) {
+        authMode = "managed_identity";
+      } else {
+        authMode = "shared_key";
+      }
+
+      // ── Blob service URL ──
+      const blobServiceUrl = getBlobServiceBaseUrl();
+
+      return formatResponse(
+        {
+          ok: true,
+          limits: {
+            maxUploadBytes,
+            maxJsonBodyBytes,
+            sasMaxExpiryMinutes,
+          },
+          sas: {
+            protocol,
+          },
+          disabledTools,
+          auth: {
+            mode: authMode,
+            accountName: cfg.accountName,
+          },
+          endpoints: {
+            blobServiceUrl,
+          },
+          capabilities: {
+            versions: null as boolean | null,
+            archiveTier: null as boolean | null,
+            maxContainerConcurrency: 4,
+          },
+        },
+        format,
+        "Store Info"
+      );
+    }
+  );
+}
+
+/**
+ * Coerce an environment variable string to a positive integer, falling back
+ * to `fallback` if the value is absent, empty, or non-numeric.
+ *
+ * @param raw      - Raw env var value (may be undefined).
+ * @param fallback - Default value when parsing fails.
+ * @returns A positive integer.
+ */
+function toPositiveInt(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return isNaN(n) || n < 1 ? fallback : n;
 }
 
 /**

@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **37 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with TotalAgility, AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **42 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed identity, and Bicep infrastructure-as-code.
 
@@ -8,16 +8,18 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
 
 ## Features
 
-- **37 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **42 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
 - **12 MCP resources** — read-only, URI-addressable data for LLM context (listings, content reads, properties)
-- **Direct file upload** — `POST /upload` endpoint for multipart form-data (bypasses base64/JSON-RPC for large files)
+- **Direct file upload** — `POST /upload` endpoint streams multipart form-data to Azure via busboy (no temp files, no full-file buffering)
 - **URL-based upload** — `blob-upload-from-url` tool fetches files server-side (no base64 through LLM context)
 - **Dual-mode transport** — stateful sessions for MCP clients + stateless one-shot for HTTP testing
 - **API key authentication** with constant-time comparison (X-API-Key header or Bearer token)
-- **Rate limiting** — configurable per-IP request limits
+- **Rate limiting** — per-endpoint budgets with API-key-aware identity; configurable window and max requests
 - **Security headers** via Helmet
 - **Session TTL** — automatic cleanup of idle sessions (30 min)
-- **SAS token generation** — blob and container-level shared access signatures
+- **SAS token generation** — blob and container-level shared access signatures with expiry ceiling and protocol control
+- **Tool gating** — `DISABLED_TOOLS` env var to disable specific tools at runtime (omitted from listings; forbidden on invocation)
+- **Server introspection** — `store-info` tool exposes limits, auth mode, endpoints, and disabled tools (no secrets)
 - **Base64 content encoding** — upload/download binary files through JSON
 - **Docker** — multi-stage build, non-root container user
 - **Azure Container Apps** — Bicep IaC, user-assigned managed identity, auto-HTTPS, auto-scaling (1–5 replicas)
@@ -42,11 +44,11 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
                                       └──────────┬───────────────┘
                                                   │
                       ┌───────────────────────────┬┴──────────────────────────┐
-                      │      35 Tools (actions)   │    12 Resources (reads)   │
+                      │      42 Tools (actions)   │    12 Resources (reads)   │
                       ├───────────────────────────┼───────────────────────────┤
-                      │ Blob (10) │ Queue (6)     │ Blob (4)  │ Queue (2)    │
+                      │ Blob (13) │ Queue (8)     │ Blob (4)  │ Queue (2)    │
                       │ Table (5) │ FileShare (8) │ Table (2) │ FileShare (4)│
-                      │ Utility (6)               │                          │
+                      │ Utility (8)               │                          │
                       └───────────┬───────────────┴──────────┬───────────────┘
                                   │                          │
                                   └──────────┬───────────────┘
@@ -69,8 +71,8 @@ mcp-azure-storage/
 │   ├── middleware/
 │   │   └── api-key.ts         # API key auth (X-API-Key / Bearer)
 │   ├── tools/
-│   │   ├── blob-tools.ts      # 11 tools — container + blob CRUD, SAS, metadata, URL upload
-│   │   ├── queue-tools.ts     #  6 tools — queue CRUD + message operations
+│   │   ├── blob-tools.ts      # 13 tools — container + blob CRUD, head, set-tier, SAS, metadata, URL upload
+│   │   ├── queue-tools.ts     #  8 tools — queue CRUD + message operations + lease renewal
 │   │   ├── table-tools.ts     #  5 tools — table CRUD + entity operations
 │   │   ├── fileshare-tools.ts #  8 tools — share/directory/file operations
 │   │   └── utility-tools.ts   #  7 tools — base64, SAS refresh, MIME lookup, upload info
@@ -90,8 +92,8 @@ mcp-azure-storage/
 │   ├── middleware/
 │   │   └── api-key.test.ts    # API key auth tests (503/401/403/pass-through)
 │   ├── tools/
-│   │   ├── blob-tools.test.ts           # 15 tests — mock Azure Blob SDK + SSRF
-│   │   ├── queue-tools.test.ts          #  7 tests — mock Azure Queue SDK
+│   │   ├── blob-tools.test.ts           # 42 tests — mock Azure Blob SDK + SSRF + lifecycle
+│   │   ├── queue-tools.test.ts          # 27 tests — mock Azure Queue SDK + lease renewal
 │   │   ├── table-tools.test.ts          #  7 tests — mock Azure Tables SDK
 │   │   ├── fileshare-tools.test.ts      #  6 tests — mock Azure File Share SDK
 │   │   ├── utility-tools.test.ts        # 10 tests — base64, MIME, container name, upload URL
@@ -133,7 +135,7 @@ mcp-azure-storage/
 
 ## Response Format Option
 
-All 37 tools accept an optional `format` parameter that controls how structured data is returned:
+All 42 tools accept an optional `format` parameter that controls how structured data is returned:
 
 | Value | Description |
 |-------|-------------|
@@ -165,7 +167,7 @@ All 37 tools accept an optional `format` parameter that controls how structured 
 
 ## Structured Error Model
 
-All 37 tools return **structured error JSON** when an operation fails. Instead of plain-text error messages, every error response uses `isError: true` with a single text content item containing a JSON object. This makes errors machine-parseable for automated retry logic, error routing, and client-side handling.
+All 42 tools return **structured error JSON** when an operation fails. Instead of plain-text error messages, every error response uses `isError: true` with a single text content item containing a JSON object. This makes errors machine-parseable for automated retry logic, error routing, and client-side handling.
 
 ### Error Response Shape
 
@@ -258,23 +260,25 @@ if (response.isError) {
 
 ## Available Tools
 
-### Blob Storage (11 tools)
+### Blob Storage (13 tools)
 
 | Tool | Description |
 |------|-------------|
 | `blob-container-create` | Create a blob container (idempotent). Use before uploading blobs to a new container. Use `util-to-container-name` to sanitise free-form text into a valid name. |
 | `blob-container-delete` | **Destructive** — permanently delete a container and ALL blobs inside it. Verify with `blob-container-exists` first. |
 | `blob-container-exists` | Check whether a container exists. Returns `{ exists: true/false }`. |
-| `blob-list` | List blobs in a container, optionally filtered by virtual directory prefix. Returns name, size, content type, dates, and optional metadata. |
+| `blob-list` | List blobs in a container, optionally filtered by virtual directory prefix or name prefix. Returns name, size, content type, etag, dates, and optional metadata. Set `includeVersions=true` to include blob version entries with `versionId` and `isCurrentVersion` fields. Use `pageSize` to control iterator page size. |
 | `blob-create` | Upload or overwrite a blob (base64 content). MIME type is auto-detected from extension. Use `util-to-base64` to encode text first. Best for small/text files. |
 | `blob-upload-from-url` | Upload a file by URL — the server fetches it server-side. **Ideal for large/binary files** (PDFs, images) that exceed LLM context limits. No base64 encoding needed. |
-| `blob-read` | Download blob content as base64, or set `returnUrl=true` to get a time-limited SAS URL instead. Use `util-from-base64` to decode text. |
-| `blob-delete` | **Destructive** — permanently delete a blob and its snapshots. |
+| `blob-head` | Get blob properties (metadata, content type, size, tier, immutability, legal hold) without downloading content. Supports version-specific lookups via `versionId`. Use to inspect a blob's state before reading, deleting, or changing its tier. |
+| `blob-read` | Download blob content as base64, or set `returnUrl=true` to get a time-limited SAS URL instead. Use `util-from-base64` to decode text. Supports version-specific reads via `versionId` and partial reads via `maxBytes` (returns `truncated: true` when the blob is larger). |
+| `blob-delete` | **Destructive** — permanently delete a blob and its snapshots. Supports version-specific deletion via `versionId`. Returns a structured `immutable` error if the blob has an immutability policy or legal hold. |
 | `blob-set-metadata` | Replace all custom metadata on a blob. Include existing keys you want to keep — this is a full replacement. |
+| `blob-set-tier` | Change a blob's access tier (Hot, Cool, or Archive). Use for lifecycle cost optimisation. Moving to Archive is **potentially destructive** — archived blobs must be rehydrated before reading, which can take hours. Supports version-specific tier changes via `versionId` and `rehydratePriority` (High or Standard). |
 | `blob-get-sas-url` | Generate a time-limited SAS URL for a specific blob. Use to grant temporary access without exposing account keys. |
 | `blob-get-container-sas` | Generate a time-limited SAS token for an entire container. Returns both the token and a ready-to-use connection string. |
 
-### Queue Storage (6 tools)
+### Queue Storage (8 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -284,6 +288,8 @@ if (response.isError) {
 | `queue-peek-messages` | Preview messages at the front of a queue WITHOUT removing them. Messages stay visible to other receivers. |
 | `queue-receive-messages` | Receive and hide messages for processing. Call `queue-delete-message` after processing to permanently remove each message. |
 | `queue-delete-message` | Permanently remove a processed message. Requires `messageId` + `popReceipt` from `queue-receive-messages`. |
+| `queue-update-message` | Update a JSON message body with additive fields (state, progress, attempt, owner, details) and optionally renew the lease. Requires `messageId` + `popReceipt`. Message body must be a JSON object (max 64 KiB). |
+| `queue-renew-lease` | Renew a message's visibility timeout (lease) without changing the body. Pass `messageText` from the receive response to preserve the body content. Requires `messageId` + `popReceipt`. |
 
 ### Table Storage (5 tools)
 
@@ -308,7 +314,7 @@ if (response.isError) {
 | `fileshare-read-file` | Download file content as base64. Use `util-from-base64` to decode text. |
 | `fileshare-delete-file` | **Destructive** — permanently delete a file from a share. |
 
-### Utilities (7 tools)
+### Utilities (8 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -319,6 +325,58 @@ if (response.isError) {
 | `util-get-content-type` | MIME type lookup by file name or extension. Returns `application/octet-stream` for unrecognised types. |
 | `util-to-container-name` | Sanitise arbitrary text (email, URL, display name) into a valid Azure container name. Use BEFORE `blob-container-create`. |
 | `util-get-upload-url` | Get the direct file upload endpoint URL, required fields, and usage examples. Use when uploading large or binary files that exceed base64/JSON-RPC limits. |
+| `store-info` | Read-only snapshot of server runtime configuration, limits, disabled tools, auth mode, endpoints, and capabilities. Use to discover upload/body size limits and self-calibrate client behaviour. No secrets included. |
+
+#### `store-info` — Server Configuration Discovery
+
+The `store-info` tool returns a read-only snapshot of the server's runtime configuration and capabilities. It is intended for MCP clients to self-calibrate limits (e.g. max upload size, SAS expiry ceiling) and discover which tools are available without trial-and-error probing.
+
+**Inputs:** `{ format?: "json" | "html" | "md" }` (default `"json"`)
+
+**Output schema:**
+
+```json
+{
+  "ok": true,
+  "limits": {
+    "maxUploadBytes": 5368709120,
+    "maxJsonBodyBytes": 52428800,
+    "sasMaxExpiryMinutes": 1440
+  },
+  "sas": {
+    "protocol": "https"
+  },
+  "disabledTools": [],
+  "auth": {
+    "mode": "shared_key",
+    "accountName": "mystorageaccount"
+  },
+  "endpoints": {
+    "blobServiceUrl": "https://mystorageaccount.blob.core.windows.net"
+  },
+  "capabilities": {
+    "versions": null,
+    "archiveTier": null,
+    "maxContainerConcurrency": 4
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `limits.maxUploadBytes` | Maximum file size for `POST /upload` (env: `MAX_UPLOAD_BYTES`, default 5 GiB). |
+| `limits.maxJsonBodyBytes` | Maximum JSON body size for `/mcp` (env: `MAX_JSON_BODY_BYTES`, default 50 MiB). |
+| `limits.sasMaxExpiryMinutes` | Ceiling for SAS token lifetime (env: `SAS_MAX_EXPIRY_MINUTES`, default 1440). |
+| `sas.protocol` | SAS protocol: `"https"` or `"https,http"` (env: `SAS_PROTOCOL`). |
+| `disabledTools` | Canonical (lowercase) list of tools disabled via `DISABLED_TOOLS`. |
+| `auth.mode` | Authentication mode: `"shared_key"`, `"managed_identity"`, or `"dual"`. |
+| `auth.accountName` | Azure Storage account name. |
+| `endpoints.blobServiceUrl` | Base URL for blob service operations (respects Azurite overrides). |
+| `capabilities.versions` | `null` (unknown); `true`/`false` if blob versioning support is detected. |
+| `capabilities.archiveTier` | `null` (unknown); `true`/`false` if Archive tier operations are permitted. |
+| `capabilities.maxContainerConcurrency` | Indicative concurrency for upload streaming (default 4). Not a strict guarantee. |
+
+> **Security:** No secrets, keys, SAS tokens, or connection strings are included in the output.
 
 ### MCP Resources (12 resources)
 
@@ -431,7 +489,9 @@ print(response.json())
 | `blobName` | No | Blob name (defaults to the uploaded filename) |
 | `metadata` | No | JSON string of key-value metadata |
 
-**Limits:** 100 MB per upload. For larger files, use Option 3 below.
+**Streaming:** The `/upload` endpoint streams files directly to Azure Blob Storage without buffering the entire file in memory or on disk. This keeps server memory bounded even for multi-GB uploads. Oversized files (exceeding `MAX_UPLOAD_BYTES`, default 5 GiB) are rejected with HTTP 413 and a structured JSON body containing `code: "too_large"` and `maxBytes`.
+
+**Limits:** Default 5 GiB per upload (configurable via `MAX_UPLOAD_BYTES`). For larger files, use Option 3 below.
 
 ### Option 3 — SAS URL direct upload (for very large files)
 
@@ -973,6 +1033,8 @@ azd down --purge
 | `CORS_ENABLED` | No | `true` | Enable CORS headers for browser-based clients (MCP Inspector, web chat). Set `false` in production if only non-browser clients connect. |
 | `SAS_EXPIRY_HOURS` | No | `24` | Default SAS token expiry (hours) |
 | `SAS_DEFAULT_PERMISSIONS` | No | `rl` | Default SAS permissions |
+| `SAS_MAX_EXPIRY_MINUTES` | No | `1440` | Maximum allowed SAS token lifetime in minutes (ceiling). Requests for `expiryMinutes` (or `expiryHours` converted to minutes) exceeding this value receive a structured `"invalid"` error with `field: "expiryMinutes"` or `field: "expiryHours"`. Default: 1440 (24 hours). Set lower (e.g. `60`) for tighter security. |
+| `SAS_PROTOCOL` | No | `https` | Controls the `spr` (signed protocol) in generated SAS tokens. `"https"` (default) — HTTPS-only, recommended for production. `"https,http"` — allow both; required for **Azurite** / local emulator which serves over plain HTTP. Case-insensitive; `"http,https"` is also accepted. |
 | `RATE_LIMIT_WINDOW_SECONDS` | No | `900` | Rate limit window in seconds (overrides `RATE_LIMIT_WINDOW_MINUTES` when set) |
 | `RATE_LIMIT_MCP_MAX` | No | `3000` | Max requests per window for `/mcp` (JSON-RPC) per identity |
 | `RATE_LIMIT_UPLOAD_MAX` | No | `600` | Max requests per window for `/upload` (multipart) per identity |
@@ -982,6 +1044,10 @@ azd down --purge
 | `MAX_SESSIONS` | No | `100` | Maximum concurrent stateful MCP sessions (returns 503 when full) |
 | `SESSION_RETRY_AFTER_SECONDS` | No | `30` | Retry hint (seconds) returned in 503 session-capacity errors |
 | `SSE_KEEPALIVE_INTERVAL_MS` | No | `30000` | Interval (ms) between SSE keepalive heartbeats. Prevents Azure reverse proxy from killing idle SSE connections (~240s timeout). |
+| `MAX_UPLOAD_BYTES` | No | `5368709120` | Hard byte limit for streaming multipart uploads via `/upload`. Default: 5 GiB. Files exceeding this are rejected with HTTP 413 (`code: "too_large"`). |
+| `MAX_JSON_BODY_BYTES` | No | `52428800` | Hard byte limit for JSON request bodies on `/mcp`. Default: 50 MiB. Controls `express.json({ limit })`. Oversized JSON bodies return HTTP 413. |
+| `MAX_QUEUE_VISIBILITY_SECONDS` | No | `3600` | Maximum allowed visibility timeout (lease duration) for `queue-update-message` and `queue-renew-lease`. Default: 3600 (1 hour). Azure Queue Storage supports up to 7 days, but this server-side cap prevents accidentally setting very long leases. |
+| `DISABLED_TOOLS` | No | _(empty)_ | Comma-separated list of tool names to disable at runtime. Disabled tools are **omitted from `tools/list`** and return a structured `"forbidden"` error (code `"forbidden"`, `data.reason: "disabled_tool"`) when invoked via `tools/call`. Values are **case-insensitive** and whitespace is trimmed. Unknown names trigger a startup warning but do not prevent the server from starting. Example: `DISABLED_TOOLS=blob-delete,fileshare-delete-share,table-delete,queue-delete`. |
 
 > **Note:** The Azure deployment uses `minReplicas: 1` to keep at least one replica always running, ensuring consistent response times and no cold-start connection drops. The Container App auto-scales up to 5 replicas under load (HTTP concurrency threshold: 20 requests). If you want to reduce costs in a non-production environment, you can set `minReplicas: 0` in [`infra/main.bicep`](infra/main.bicep:342), but be aware that scale-to-zero causes 10–30 second cold starts that may time out HTTP clients like Postman.
 
@@ -1003,7 +1069,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 - **Constant-time comparison** — API key validation uses `crypto.timingSafeEqual` to prevent timing attacks
 - **No query-param auth** — API keys are only accepted via headers (not URLs that leak to logs)
 - **SSRF protection** — `blob-upload-from-url` validates URLs before fetching: blocks loopback, link-local (Azure IMDS 169.254.169.254), private RFC 1918 ranges, non-HTTP schemes, and open redirects (`redirect: "error"`)
-- **Upload limits** — `POST /upload` capped at 100 MB via `multer`; rate-limited by the same per-IP limiter as `/mcp`
+- **Streaming uploads** — `POST /upload` streams directly to Azure Blob Storage via busboy + `uploadStream` (no temp files, no full-file buffering). Capped at `MAX_UPLOAD_BYTES` (default 5 GiB); oversized files return 413 with `code: "too_large"`. Rate-limited by the same per-identity limiter as `/mcp`
 - **Helmet** — sets security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
 - **Rate limiting** — per-IP request throttling on both `/mcp` and `/upload` endpoints
 - **Session TTL** — idle sessions are automatically evicted after 30 minutes
@@ -1037,7 +1103,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 
 ## Testing
 
-### Unit Tests (156 tests, no Azure required)
+### Unit Tests (244 tests, no Azure required)
 
 Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
 
@@ -1052,7 +1118,7 @@ npm run test:watch
 npm run test:coverage
 ```
 
-**Test coverage:** Config, API key middleware, all 37 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
+**Test coverage:** Config, API key middleware, rate limiting, disabled-tool gating, structured errors, all 42 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
 
 ### Integration Tests (Azurite)
 
@@ -1076,6 +1142,36 @@ This sets `TEST_INTEGRATION=1` and uses the Azurite well-known credentials from 
 
 ```bash
 docker compose -f docker-compose.azurite.yml down
+```
+
+### Running Integration Tests — Advanced Gating
+
+Integration tests use environment-variable gates to control which test suites run. This keeps default CI fast while still allowing heavy or live-Azure tests on demand.
+
+| Gate variable | Default | Effect |
+|---------------|---------|--------|
+| `TEST_INTEGRATION` | `0` (off) | Master gate — set to `1` to enable any integration test. `npm run test:integration` sets this automatically. |
+| `TEST_UPLOAD_LARGE` | `0` (off) | Set to `1` to enable 150+ MiB streaming upload tests. Skipped by default to keep CI under 60 s. |
+| `TEST_AZURE_LIVE` | `0` (off) | Set to `1` to enable tests that require a live Azure Storage account (not Azurite). Also implicitly enables large upload tests. |
+| `TEST_UPLOAD_MB` | `150` | Size in MiB for the large upload test payload. Only used when `TEST_UPLOAD_LARGE=1` or `TEST_AZURE_LIVE=1`. |
+
+**Azurite SAS protocol:** Azurite serves over plain HTTP, so SAS tokens generated with the default `SAS_PROTOCOL=https` will fail validation. Set `SAS_PROTOCOL=https,http` in your `.env.test` or test environment when running SAS-related integration tests against Azurite.
+
+**Endpoint overrides:** Azurite uses non-standard URLs (`http://127.0.0.1:10000/<account>`). The integration test environment configures these via:
+
+```env
+AZURE_BLOB_SERVICE_URL=http://127.0.0.1:10000/devstoreaccount1
+AZURE_QUEUE_SERVICE_URL=http://127.0.0.1:10001/devstoreaccount1
+AZURE_TABLE_SERVICE_URL=http://127.0.0.1:10002/devstoreaccount1
+```
+
+These are already set in [`.env.test`](.env.test). For live Azure tests, unset these overrides so SDK clients connect to the real service endpoints.
+
+**Example — run large upload tests locally:**
+
+```bash
+docker compose -f docker-compose.azurite.yml up -d
+set TEST_INTEGRATION=1&& set TEST_UPLOAD_LARGE=1&& vitest run --config vitest.integration.config.ts
 ```
 
 ### CI / GitHub Actions
@@ -1105,9 +1201,10 @@ tests/
 │   ├── table-resources.test.ts
 │   └── fileshare-resources.test.ts
 └── integration/                  # Real CRUD against Azurite (gated by TEST_INTEGRATION)
-    ├── blob-integration.test.ts
-    ├── queue-integration.test.ts
-    └── table-integration.test.ts
+    ├── blob-integration.test.ts    # Blob CRUD + head + set-tier + versioned reads
+    ├── queue-integration.test.ts   # Queue CRUD + update-message + renew-lease
+    ├── upload-integration.test.ts  # Streaming upload via POST /upload (large tests gated)
+    └── table-integration.test.ts   # Table CRUD smoke test
 ```
 
 ---

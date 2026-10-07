@@ -66,6 +66,13 @@ param existingStorageAccountKey string = ''
 // Enable via the deploy script: .\deploy_to_azure.ps1 -EnableLifecyclePolicy
 param enableLifecyclePolicy bool = false
 
+// ── Disabled Tools (optional) ────────────────────────
+// Comma-separated list of tool names to disable at runtime.
+// Disabled tools are omitted from tools/list and return a structured
+// "forbidden" error when invoked. Case-insensitive. Empty string means
+// all tools are enabled (default).
+param disabledTools string = ''
+
 // Computed flag: true when the user is bringing their own storage account.
 var useExistingStorage = !empty(existingStorageAccountName) && !empty(existingStorageAccountKey)
 
@@ -415,6 +422,46 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               // token generation; data ops use the Container App's identity.
               name: 'AZURE_USE_MANAGED_IDENTITY'
               value: 'false'
+            }
+            {
+              // Hard byte limit for streaming multipart uploads via /upload.
+              // Default: 5 GiB (5368709120). Files beyond this are rejected
+              // with a 413 response containing a write SAS URL hint.
+              name: 'MAX_UPLOAD_BYTES'
+              value: '5368709120'
+            }
+            {
+              // Hard byte limit for JSON request bodies on /mcp.
+              // Default: 50 MiB (52428800). Controls express.json({ limit }).
+              name: 'MAX_JSON_BODY_BYTES'
+              value: '52428800'
+            }
+            {
+              // Maximum visibility timeout (lease duration) in seconds for
+              // queue-update-message and queue-renew-lease. Default: 3600 (1h).
+              name: 'MAX_QUEUE_VISIBILITY_SECONDS'
+              value: '3600'
+            }
+            {
+              // Comma-separated list of tool names to disable at runtime.
+              // Disabled tools are omitted from tools/list and return a
+              // structured "forbidden" error when invoked. Case-insensitive.
+              // Empty string (default) means all tools are enabled.
+              name: 'DISABLED_TOOLS'
+              value: disabledTools
+            }
+            {
+              // Maximum allowed SAS token lifetime in minutes.
+              // Default: 1440 (24 hours). Requests exceeding this ceiling
+              // receive a structured "invalid" error instead of silent clamping.
+              name: 'SAS_MAX_EXPIRY_MINUTES'
+              value: '1440'
+            }
+            {
+              // SAS protocol selection: "https" (default, production-safe) or
+              // "https,http" (required for Azurite / local emulator which uses HTTP).
+              name: 'SAS_PROTOCOL'
+              value: 'https'
             }
           ]
         }
