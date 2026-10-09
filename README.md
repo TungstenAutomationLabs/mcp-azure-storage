@@ -798,15 +798,18 @@ The [`deploy_to_azure.ps1`](deploy_to_azure.ps1) script automates the entire dep
 # Use a different env file
 .\deploy_to_azure.ps1 -EnvFile ".env.production"
 
-# Enable storage lifecycle policy (auto-tiering to Cool/Archive)
-.\deploy_to_azure.ps1 -EnableLifecyclePolicy
+# Enable one-way lifecycle policy (Cold after 15d, Archive after 90d)
+.\deploy_to_azure.ps1 -LifecyclePolicy one-way
+
+# Enable smart lifecycle policy (Cool after 30d inactivity, auto-reheat on access)
+.\deploy_to_azure.ps1 -LifecyclePolicy smart
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-EnvFile <path>` | Path to the `.env` file. Defaults to `.env` in the script directory. |
 | `-SkipProvision` | Runs `azd deploy` instead of `azd up` (skips Bicep provisioning). Use when only code has changed. |
-| `-EnableLifecyclePolicy` | Provisions Azure Storage lifecycle management rules on new storage accounts (see below). |
+| `-LifecyclePolicy <mode>` | Controls automatic blob access-tier transitions on new storage accounts. Values: `none` (default), `one-way`, `smart`. See below. |
 
 **What the script does:**
 1. Parses your `.env` file for uncommented `KEY=VALUE` lines
@@ -818,18 +821,37 @@ The [`deploy_to_azure.ps1`](deploy_to_azure.ps1) script automates the entire dep
 
 #### Storage Lifecycle Policy
 
-The `-EnableLifecyclePolicy` flag provisions automatic blob tiering rules that reduce storage costs without any application changes:
+The `-LifecyclePolicy` parameter controls automatic blob access-tier transitions that reduce storage costs without any application changes. Three modes are available:
+
+| Mode | Description |
+|------|-------------|
+| `none` | **(default)** No lifecycle rules. All blobs stay in Hot tier. |
+| `one-way` | Blobs move to cheaper tiers based on modification date and never automatically return. Cold after 15 days, Archive after 90 days. Archived blobs must be manually rehydrated (via the `blob-set-tier` tool) before they can be read. |
+| `smart` | Blobs move to Cool tier after 30 days of inactivity (no reads), then automatically promote back to Hot when accessed. Enables access-time tracking on the storage account. Does **not** use Archive tier (Azure cannot auto-rehydrate archived blobs). |
+
+##### Mode details
+
+**`one-way` mode rules:**
 
 | Rule | Scope | Action |
 |------|-------|--------|
-| `cool-after-30-days` | All block blobs | Move to **Cool** tier after 30 days of no modification |
-| `archive-after-90-days` | Blobs under `backups/` or `archives/` prefixes | Move to **Archive** tier after 90 days of no modification |
+| `cold-after-15-days` | All block blobs | Move to **Cold** tier after 15 days of no modification |
+| `archive-after-90-days` | All block blobs | Move to **Archive** tier after 90 days of no modification |
+
+**`smart` mode rules:**
+
+| Rule | Scope | Action |
+|------|-------|--------|
+| `cool-after-30-days-inactive` | All block blobs | Move to **Cool** tier after 30 days with no access |
+| _(automatic)_ | Cool blobs | Auto-promote back to **Hot** when accessed (`enableAutoTierToHotFromCool`) |
+
+> **Why no Archive in smart mode?** Azure lifecycle management can automatically move blobs *into* Archive tier, but it cannot automatically rehydrate them when accessed. Rehydration is a manual, asynchronous operation that takes up to 15 hours (Standard priority) or under 1 hour (High priority). Smart mode uses only Hot/Cool tiers where automatic promotion is supported.
 
 **Notes:**
-- **Off by default** — the flag must be explicitly passed to enable lifecycle rules
-- **Only applies to new storage accounts** provisioned by Bicep — has no effect when using BYOSA (bring-your-own storage account)
-- To disable after enabling, run a deploy without the flag; the next `azd provision` will remove the lifecycle policy
-- Thresholds (30/90 days) can be customised by editing [`infra/main.bicep`](infra/main.bicep)
+- **Off by default** (`none`) -- no lifecycle rules are provisioned
+- **Only applies to new storage accounts** provisioned by Bicep -- has no effect when using BYOSA (bring-your-own storage account)
+- To change modes, pass the new `-LifecyclePolicy` value and run `azd provision`; the next deployment will replace the lifecycle policy
+- Day thresholds can be customised by editing [`infra/main.bicep`](infra/main.bicep)
 
 > **Prerequisites:** You must have run `az login`, `azd auth login`, and `azd init` at least once before using the script. See the manual steps below if this is your first deployment.
 
@@ -1097,13 +1119,13 @@ The deployment includes three mechanisms to ensure reliable connections:
 | `azd:test` | `npm run azd:test` | Provision + deploy to test environment |
 | `azd:test:provision` | `npm run azd:test:provision` | Provision test infrastructure only |
 | `azd:test:deploy` | `npm run azd:test:deploy` | Deploy app to test only (skip provision) |
-| — | `.\deploy_to_azure.ps1` | Reads `.env`, syncs vars to azd env, runs `azd up` (add `-SkipProvision` for code-only deploy, `-EnableLifecyclePolicy` for auto-tiering) |
+| -- | `.\deploy_to_azure.ps1` | Reads `.env`, syncs vars to azd env, runs `azd up` (add `-SkipProvision` for code-only deploy, `-LifecyclePolicy one-way\|smart` for auto-tiering) |
 
 ---
 
 ## Testing
 
-### Unit Tests (244 tests, no Azure required)
+### Unit Tests (285 tests, no Azure required)
 
 Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
 
