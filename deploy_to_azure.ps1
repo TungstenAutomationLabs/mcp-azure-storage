@@ -20,12 +20,16 @@
     If set, runs `azd deploy` instead of `azd up` (skips infrastructure provisioning).
     Use this when you've only changed code, not infrastructure or env vars.
 
-.PARAMETER EnableLifecyclePolicy
-    If set, provisions Azure Storage lifecycle management rules on new storage
-    accounts. These rules automatically move blobs to cheaper access tiers:
-      - All block blobs → Cool tier after 30 days
-      - Blobs under backups/ or archives/ → Archive tier after 90 days
-    Off by default. Has no effect when using BYOSA (bring-your-own storage).
+.PARAMETER LifecyclePolicy
+    Controls automatic blob access-tier transitions on new storage accounts.
+    Has no effect when using BYOSA (bring-your-own storage). Values:
+
+      none     (default) No lifecycle rules. All blobs stay in Hot tier.
+      one-way  Blobs move to Cold after 15 days, Archive after 90 days.
+               Archived blobs must be manually rehydrated to read.
+      smart    Blobs move to Cool after 30 days of inactivity, then
+               automatically return to Hot when accessed. Does not use
+               Archive tier. Enables access-time tracking on the account.
 
 .EXAMPLE
     .\deploy_to_azure.ps1
@@ -40,18 +44,23 @@
     # Use a different env file
 
 .EXAMPLE
-    .\deploy_to_azure.ps1 -EnableLifecyclePolicy
-    # Provision with storage lifecycle policy (auto-tiering)
+    .\deploy_to_azure.ps1 -LifecyclePolicy one-way
+    # Provision with one-way tiering (Cold after 15d, Archive after 90d)
+
+.EXAMPLE
+    .\deploy_to_azure.ps1 -LifecyclePolicy smart
+    # Provision with smart tiering (Cool after 30d inactivity, auto-reheat)
 #>
 
 [CmdletBinding()]
 param(
     [string]$EnvFile = "",
     [switch]$SkipProvision,
-    [switch]$EnableLifecyclePolicy
+    [ValidateSet("none", "one-way", "smart")]
+    [string]$LifecyclePolicy = "none"
 )
 
-# Resolve EnvFile default — $PSScriptRoot can be empty when invoked via -File
+# Resolve EnvFile default -- $PSScriptRoot can be empty when invoked via -File
 if ([string]::IsNullOrEmpty($EnvFile)) {
     $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
     $EnvFile = Join-Path $scriptDir ".env"
@@ -134,12 +143,11 @@ foreach ($key in $syncKeys) {
 }
 
 # -- 4b. Set optional infrastructure flags --
-if ($EnableLifecyclePolicy) {
-    azd env set ENABLE_LIFECYCLE_POLICY "true" 2>$null
-    Write-Ok "ENABLE_LIFECYCLE_POLICY = true (auto-tier blobs to Cool/Archive)"
-} else {
-    azd env set ENABLE_LIFECYCLE_POLICY "false" 2>$null
-    Write-Skip "Lifecycle policy disabled (pass -EnableLifecyclePolicy to enable)"
+azd env set LIFECYCLE_POLICY_MODE $LifecyclePolicy 2>$null
+switch ($LifecyclePolicy) {
+    "none"    { Write-Skip "Lifecycle policy: none (all blobs stay Hot)" }
+    "one-way" { Write-Ok   "Lifecycle policy: one-way (Cold after 15d, Archive after 90d)" }
+    "smart"   { Write-Ok   "Lifecycle policy: smart (Cool after 30d inactivity, auto-reheat on access)" }
 }
 
 # -- 5. Show summary before deploying --
@@ -155,10 +163,10 @@ if ($SkipProvision) {
 } else {
     Write-Host "  Mode:            Full provision + deploy (azd up)" -ForegroundColor White
 }
-if ($EnableLifecyclePolicy) {
-    Write-Host "  Lifecycle Policy: ENABLED (Cool after 30d, Archive after 90d)" -ForegroundColor White
-} else {
-    Write-Host "  Lifecycle Policy: Disabled (pass -EnableLifecyclePolicy to enable)" -ForegroundColor DarkGray
+switch ($LifecyclePolicy) {
+    "none"    { Write-Host "  Lifecycle Policy: None (all blobs stay Hot)"                               -ForegroundColor DarkGray }
+    "one-way" { Write-Host "  Lifecycle Policy: One-way (Cold after 15d, Archive after 90d)"             -ForegroundColor White }
+    "smart"   { Write-Host "  Lifecycle Policy: Smart (Cool after 30d inactivity, auto-reheat on access)" -ForegroundColor White }
 }
 
 # -- 6. Confirm --

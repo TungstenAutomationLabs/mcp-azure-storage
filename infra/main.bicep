@@ -57,14 +57,29 @@ param existingStorageAccountName string = ''
 @secure()
 param existingStorageAccountKey string = ''
 
-// ── Storage Lifecycle Policy (opt-in) ────────────────────────
-// When true, provisions lifecycle management rules that automatically move
-// blobs to cheaper access tiers based on age:
-//   - All block blobs → Cool tier after 30 days
-//   - Blobs under backups/ or archives/ → Archive tier after 90 days
+// ── Storage Lifecycle Policy Mode ────────────────────────────
+// Controls automatic blob access-tier transitions to reduce storage costs.
 // Only applies to new storage accounts (ignored when using BYOSA).
-// Enable via the deploy script: .\deploy_to_azure.ps1 -EnableLifecyclePolicy
-param enableLifecyclePolicy bool = false
+//
+// Allowed values:
+//   'none'    — (default) No lifecycle rules. All blobs stay in Hot tier.
+//   'one-way' — Blobs transition to cheaper tiers based on modification date
+//               and never automatically return to Hot:
+//                 All block blobs  -> Cold tier after 15 days
+//                 All block blobs  -> Archive tier after 90 days
+//               Archived blobs must be manually rehydrated to read.
+//   'smart'   — Blobs transition to Cool after 30 days of no access, and
+//               automatically promote back to Hot when accessed again.
+//               Requires access-time tracking on the storage account.
+//               Does NOT use Archive tier (archive cannot auto-rehydrate).
+//
+// Set via the deploy script: .\deploy_to_azure.ps1 -LifecyclePolicy one-way
+@allowed([
+  'none'
+  'one-way'
+  'smart'
+])
+param lifecyclePolicyMode string = 'none'
 
 // ── Disabled Tools (optional) ────────────────────────
 // Comma-separated list of tool names to disable at runtime.
@@ -191,6 +206,9 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
 // =============================================================================
 
 // ── Storage Account (new, only when NOT using BYOSA) ─────────
+// When lifecyclePolicyMode is 'smart', access-time tracking is enabled so
+// lifecycle rules can use daysAfterLastAccessTimeGreaterThan filters and
+// enableAutoTierToHotFromCool to auto-promote blobs back to Hot on access.
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!useExistingStorage) {
   name: '${replace(envName, '-', '')}stor'
   location: location
@@ -200,6 +218,24 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!us
     accessTier: 'Hot'
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
+  }
+}
+
+// ── Blob Service Properties (access-time tracking for smart mode) ──
+// Access-time tracking records the last time each blob was read. This is
+// required for lifecycle rules that use daysAfterLastAccessTimeGreaterThan
+// and enableAutoTierToHotFromCool. Only enabled when 'smart' mode is selected
+// because tracking incurs a small per-operation cost.
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = if (!useExistingStorage && lifecyclePolicyMode == 'smart') {
+  parent: storageAccount
+  name: 'default'
+  properties: {
+    lastAccessTimeTrackingPolicy: {
+      enable: true
+      blobType: [
+        'blockBlob'
+      ]
+    }
   }
 }
 
@@ -238,32 +274,32 @@ resource tableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
-// ── Lifecycle Management Policy (only for newly-provisioned storage) ──
-// Automatically transitions blobs between access tiers based on age,
-// reducing storage costs without any application code changes.
-//
-// Rules:
-//   1. All block blobs → Cool tier after 30 days of no modification
-//   2. Blobs under backups/ or archives/ → Archive tier after 90 days
+// ── Lifecycle Management Policies (only for newly-provisioned storage) ──
+// Automatically transition blobs between access tiers to reduce storage
+// costs without any application code changes.
 //
 // Only applies to new storage accounts. BYOSA customers manage their own
-// lifecycle policies. These thresholds are sensible defaults; adjust by
-// editing the daysAfterModificationGreaterThan values below.
-resource lifecyclePolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = if (enableLifecyclePolicy && !useExistingStorage) {
+// lifecycle policies.
+//
+// 'one-way' mode — blobs move to cheaper tiers and never auto-return:
+//   Rule 1: All block blobs -> Cold tier after 15 days (no modification)
+//   Rule 2: All block blobs -> Archive tier after 90 days (no modification)
+//   Archived blobs must be manually rehydrated via blob-set-tier tool.
+resource lifecyclePolicyOneWay 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = if (lifecyclePolicyMode == 'one-way' && !useExistingStorage) {
   parent: storageAccount
   name: 'default'
   properties: {
     policy: {
       rules: [
         {
-          name: 'cool-after-30-days'
+          name: 'cold-after-15-days'
           enabled: true
           type: 'Lifecycle'
           definition: {
             actions: {
               baseBlob: {
-                tierToCool: {
-                  daysAfterModificationGreaterThan: 30
+                tierToCold: {
+                  daysAfterModificationGreaterThan: 15
                 }
               }
             }
@@ -290,9 +326,44 @@ resource lifecyclePolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2
               blobTypes: [
                 'blockBlob'
               ]
-              prefixMatch: [
-                'backups/'
-                'archives/'
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+
+// 'smart' mode — blobs cool down after inactivity and auto-reheat on access:
+//   Rule 1: All block blobs -> Cool tier after 30 days with no access
+//   Rule 2: Auto-promote Cool blobs back to Hot when accessed
+//   Does NOT use Archive tier (archive cannot auto-rehydrate).
+//   Requires access-time tracking (enabled via blobService resource above).
+resource lifecyclePolicySmart 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = if (lifecyclePolicyMode == 'smart' && !useExistingStorage) {
+  parent: storageAccount
+  name: 'default'
+  dependsOn: [
+    blobService    // Access-time tracking must be enabled first
+  ]
+  properties: {
+    policy: {
+      rules: [
+        {
+          name: 'cool-after-30-days-inactive'
+          enabled: true
+          type: 'Lifecycle'
+          definition: {
+            actions: {
+              baseBlob: {
+                tierToCool: {
+                  daysAfterLastAccessTimeGreaterThan: 30
+                }
+                enableAutoTierToHotFromCool: true
+              }
+            }
+            filters: {
+              blobTypes: [
+                'blockBlob'
               ]
             }
           }
