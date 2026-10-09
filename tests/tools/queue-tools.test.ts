@@ -2,7 +2,6 @@
  * Unit tests for src/tools/queue-tools.ts
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── Mock Azure Storage Queue SDK ─────────────────────────────────────────
 const mockListQueues = vi.fn();
@@ -17,10 +16,10 @@ const mockUpdateMessage = vi.fn();
 
 vi.mock("@azure/storage-queue", () => {
   return {
-    StorageSharedKeyCredential: vi.fn().mockImplementation(() => ({})),
-    QueueServiceClient: vi.fn().mockImplementation(() => ({
+    StorageSharedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
+    QueueServiceClient: vi.fn().mockImplementation(function() { return {
       listQueues: mockListQueues,
-      getQueueClient: vi.fn().mockImplementation(() => ({
+      getQueueClient: vi.fn().mockImplementation(function() { return {
         createIfNotExists: mockCreateIfNotExists,
         delete: mockQueueDelete,
         sendMessage: mockSendMessage,
@@ -29,8 +28,8 @@ vi.mock("@azure/storage-queue", () => {
         deleteMessage: mockDeleteMessage,
         getProperties: mockGetProperties,
         updateMessage: mockUpdateMessage,
-      })),
-    })),
+      }; }),
+    }; }),
   };
 });
 

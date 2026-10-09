@@ -16,7 +16,6 @@
  *   set TEST_INTEGRATION=1&& set TEST_UPLOAD_LARGE=1&& vitest run --config vitest.integration.config.ts tests/integration/upload-integration.test.ts
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   BlobServiceClient,
   StorageSharedKeyCredential,

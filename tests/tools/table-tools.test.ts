@@ -2,7 +2,6 @@
  * Unit tests for src/tools/table-tools.ts
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── Mock Azure Data Tables SDK ───────────────────────────────────────────
 const mockListTables = vi.fn();
@@ -15,18 +14,18 @@ const mockDeleteEntity = vi.fn();
 
 vi.mock("@azure/data-tables", () => {
   return {
-    AzureNamedKeyCredential: vi.fn().mockImplementation(() => ({})),
-    TableServiceClient: vi.fn().mockImplementation(() => ({
+    AzureNamedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
+    TableServiceClient: vi.fn().mockImplementation(function() { return {
       listTables: mockListTables,
       createTable: mockCreateTable,
       deleteTable: mockDeleteTable,
-    })),
-    TableClient: vi.fn().mockImplementation(() => ({
+    }; }),
+    TableClient: vi.fn().mockImplementation(function() { return {
       upsertEntity: mockUpsertEntity,
       getEntity: mockGetEntity,
       listEntities: mockListEntities,
       deleteEntity: mockDeleteEntity,
-    })),
+    }; }),
   };
 });
 

@@ -5,7 +5,6 @@
  * at module scope, so mocks must be ready before module evaluation.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const { mockListTables, mockGetEntity } = vi.hoisted(() => ({
   mockListTables: vi.fn(),
@@ -14,13 +13,13 @@ const { mockListTables, mockGetEntity } = vi.hoisted(() => ({
 
 vi.mock("@azure/data-tables", () => {
   return {
-    AzureNamedKeyCredential: vi.fn().mockImplementation(() => ({})),
-    TableServiceClient: vi.fn().mockImplementation(() => ({
+    AzureNamedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
+    TableServiceClient: vi.fn().mockImplementation(function() { return {
       listTables: mockListTables,
-    })),
-    TableClient: vi.fn().mockImplementation(() => ({
+    }; }),
+    TableClient: vi.fn().mockImplementation(function() { return {
       getEntity: mockGetEntity,
-    })),
+    }; }),
   };
 });
 

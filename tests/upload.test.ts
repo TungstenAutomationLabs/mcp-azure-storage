@@ -14,7 +14,6 @@
  *  - JSON body parser returns structured 413 with maxJsonBodyBytes
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express, { Request, Response, NextFunction } from "express";
 import supertest from "supertest";
 import { Readable, PassThrough } from "stream";
@@ -39,8 +38,8 @@ const mockBlobServiceClient = {
 };
 
 vi.mock("@azure/storage-blob", () => ({
-  BlobServiceClient: vi.fn().mockImplementation(() => mockBlobServiceClient),
-  StorageSharedKeyCredential: vi.fn().mockImplementation(() => ({})),
+  BlobServiceClient: vi.fn().mockImplementation(function() { return mockBlobServiceClient; }),
+  StorageSharedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
   ContainerSASPermissions: { parse: vi.fn().mockReturnValue({}) },
   generateBlobSASQueryParameters: vi.fn().mockReturnValue({
     toString: () => "sv=2023-01-01&sig=fakesas",

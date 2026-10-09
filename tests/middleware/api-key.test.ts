@@ -4,7 +4,6 @@
  * Tests API key authentication middleware behaviour without any Azure dependencies.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import request from "supertest";
 

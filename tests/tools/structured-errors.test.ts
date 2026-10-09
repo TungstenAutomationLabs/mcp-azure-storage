@@ -7,7 +7,6 @@
  * SAS sanitisation and success-shape preservation.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
 
 // ── Mock Azure Storage Blob SDK (needed for blob-tools success test) ─────
@@ -16,25 +15,25 @@ const mockExists = vi.fn();
 
 vi.mock("@azure/storage-blob", () => {
   return {
-    StorageSharedKeyCredential: vi.fn().mockImplementation(() => ({})),
-    BlobServiceClient: vi.fn().mockImplementation(() => ({
-      getContainerClient: vi.fn().mockImplementation(() => ({
+    StorageSharedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
+    BlobServiceClient: vi.fn().mockImplementation(function() { return {
+      getContainerClient: vi.fn().mockImplementation(function() { return {
         exists: mockExists,
         create: vi.fn(),
         delete: vi.fn(),
         listBlobsFlat: mockListBlobsFlat,
-        getBlockBlobClient: vi.fn().mockImplementation(() => ({
+        getBlockBlobClient: vi.fn().mockImplementation(function() { return {
           uploadData: vi.fn(),
           setMetadata: vi.fn(),
           delete: vi.fn(),
-        })),
-        getBlobClient: vi.fn().mockImplementation(() => ({
+        }; }),
+        getBlobClient: vi.fn().mockImplementation(function() { return {
           download: vi.fn(),
           setMetadata: vi.fn(),
           getProperties: vi.fn(),
-        })),
-      })),
-    })),
+        }; }),
+      }; }),
+    }; }),
     generateBlobSASQueryParameters: vi.fn().mockReturnValue({
       toString: () => "sv=2023-01-01&sig=fakesig",
     }),

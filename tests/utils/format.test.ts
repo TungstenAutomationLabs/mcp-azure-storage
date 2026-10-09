@@ -10,7 +10,6 @@
  *  - Markdown pipe escaping
  */
 
-import { describe, it, expect } from "vitest";
 import { formatResponse, toHtml, toMarkdown } from "../../src/utils/format.js";
 
 describe("format utilities", () => {

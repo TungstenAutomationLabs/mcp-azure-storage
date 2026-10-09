@@ -5,7 +5,6 @@
  * plus the validation / singleton behaviour of getStorageConfig().
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 /** List of env vars touched by these tests — saved / restored in each run. */
 const ENV_KEYS = [
@@ -250,9 +249,9 @@ describe("config", () => {
       delete process.env.AZURE_STORAGE_ACCOUNT_KEY;
 
       // Mock @azure/identity to avoid real credential discovery
-      const mockDefaultAzureCredential = vi.fn().mockImplementation(() => ({
+      const mockDefaultAzureCredential = vi.fn().mockImplementation(function() { return {
         _isMockCredential: true,
-      }));
+      }; });
       vi.doMock("@azure/identity", () => ({
         DefaultAzureCredential: mockDefaultAzureCredential,
       }));

@@ -5,7 +5,6 @@
  * Tests tool registration and handler behaviour via the MCP test harness.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Readable } from "stream";
 
 // ── Mock Azure Storage Blob SDK ──────────────────────────────────────────
@@ -56,18 +55,18 @@ vi.mock("@azure/storage-blob", () => {
   };
 
   return {
-    StorageSharedKeyCredential: vi.fn().mockImplementation(() => ({})),
-    BlobServiceClient: vi.fn().mockImplementation(() => ({
+    StorageSharedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
+    BlobServiceClient: vi.fn().mockImplementation(function() { return {
       listContainers: mockListContainers,
-      getContainerClient: vi.fn().mockImplementation(() => ({
+      getContainerClient: vi.fn().mockImplementation(function() { return {
         exists: mockExists,
         create: mockCreate,
         delete: mockDelete,
         listBlobsFlat: mockListBlobsFlat,
         getBlockBlobClient: vi.fn().mockImplementation(() => createBlockBlobClient()),
         getBlobClient: vi.fn().mockImplementation(() => createBlobClient()),
-      })),
-    })),
+      }; }),
+    }; }),
     generateBlobSASQueryParameters: vi.fn().mockReturnValue({
       toString: () => "sv=2023-01-01&sig=fakesig&spr=https",
     }),

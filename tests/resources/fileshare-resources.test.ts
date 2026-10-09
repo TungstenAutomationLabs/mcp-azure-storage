@@ -5,7 +5,6 @@
  * at module scope, so mocks must be ready before module evaluation.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Readable } from "stream";
 
 const {
@@ -22,19 +21,19 @@ const {
 
 vi.mock("@azure/storage-file-share", () => {
   return {
-    StorageSharedKeyCredential: vi.fn().mockImplementation(() => ({})),
-    ShareServiceClient: vi.fn().mockImplementation(() => ({
+    StorageSharedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
+    ShareServiceClient: vi.fn().mockImplementation(function() { return {
       listShares: mockListShares,
-      getShareClient: vi.fn().mockImplementation(() => ({
-        getDirectoryClient: vi.fn().mockImplementation(() => ({
+      getShareClient: vi.fn().mockImplementation(function() { return {
+        getDirectoryClient: vi.fn().mockImplementation(function() { return {
           listFilesAndDirectories: mockListFilesAndDirectories,
-          getFileClient: vi.fn().mockImplementation(() => ({
+          getFileClient: vi.fn().mockImplementation(function() { return {
             getProperties: mockFileGetProperties,
             download: mockFileDownload,
-          })),
-        })),
-      })),
-    })),
+          }; }),
+        }; }),
+      }; }),
+    }; }),
   };
 });
 

@@ -2,7 +2,6 @@
  * Unit tests for src/tools/fileshare-tools.ts
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Readable } from "stream";
 
 // ── Mock Azure Storage File Share SDK ────────────────────────────────────
@@ -20,21 +19,21 @@ const mockFileDownload = vi.fn();
 const mockFileDelete = vi.fn();
 const mockFileGetProperties = vi.fn();
 
-const mockGetFileClient = vi.fn().mockImplementation(() => ({
+const mockGetFileClient = vi.fn().mockImplementation(function() { return {
   create: mockFileCreate,
   uploadRange: mockFileUploadRange,
   download: mockFileDownload,
   delete: mockFileDelete,
   getProperties: mockFileGetProperties,
-}));
+}; });
 
-const mockGetDirectoryClient = vi.fn().mockImplementation(() => ({
+const mockGetDirectoryClient = vi.fn().mockImplementation(function() { return {
   exists: mockDirExists,
   create: mockDirCreate,
   delete: mockDirDelete,
   listFilesAndDirectories: mockListFilesAndDirectories,
   getFileClient: mockGetFileClient,
-}));
+}; });
 
 const mockRootDirectoryClient = {
   listFilesAndDirectories: mockListFilesAndDirectories,
@@ -43,17 +42,17 @@ const mockRootDirectoryClient = {
 
 vi.mock("@azure/storage-file-share", () => {
   return {
-    StorageSharedKeyCredential: vi.fn().mockImplementation(() => ({})),
-    ShareServiceClient: vi.fn().mockImplementation(() => ({
+    StorageSharedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
+    ShareServiceClient: vi.fn().mockImplementation(function() { return {
       listShares: mockListShares,
-      getShareClient: vi.fn().mockImplementation(() => ({
+      getShareClient: vi.fn().mockImplementation(function() { return {
         exists: mockShareExists,
         create: mockShareCreate,
         delete: mockShareDelete,
         getDirectoryClient: mockGetDirectoryClient,
         rootDirectoryClient: mockRootDirectoryClient,
-      })),
-    })),
+      }; }),
+    }; }),
   };
 });
 

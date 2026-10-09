@@ -2,12 +2,11 @@
  * Unit tests for src/tools/utility-tools.ts
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Mock Azure Storage Blob SDK (for SAS tools) ─────────────────────────
 vi.mock("@azure/storage-blob", () => {
   return {
-    StorageSharedKeyCredential: vi.fn().mockImplementation(() => ({})),
+    StorageSharedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
     generateBlobSASQueryParameters: vi.fn().mockReturnValue({
       toString: () => "sv=2023-01-01&sig=fakesig&spr=https",
     }),

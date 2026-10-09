@@ -9,7 +9,6 @@
  * Run: npm run test:integration
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   QueueServiceClient,
   StorageSharedKeyCredential,

@@ -43,3 +43,6 @@ mcp.json
 
 # Plans:
 plans/
+
+# Vitest 5 generated reports/artifacts:
+.vitest/

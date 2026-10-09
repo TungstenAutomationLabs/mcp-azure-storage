@@ -6,7 +6,6 @@
  * at module scope, so mocks must be ready before module evaluation.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Readable } from "stream";
 
 // ── Mock Azure Storage Blob SDK ──────────────────────────────────────────
@@ -27,18 +26,18 @@ const {
 
 vi.mock("@azure/storage-blob", () => {
   return {
-    StorageSharedKeyCredential: vi.fn().mockImplementation(() => ({})),
-    BlobServiceClient: vi.fn().mockImplementation(() => ({
+    StorageSharedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
+    BlobServiceClient: vi.fn().mockImplementation(function() { return {
       listContainers: mockListContainers,
-      getContainerClient: vi.fn().mockImplementation(() => ({
+      getContainerClient: vi.fn().mockImplementation(function() { return {
         listBlobsFlat: mockListBlobsFlat,
         getProperties: mockContainerGetProperties,
-        getBlobClient: vi.fn().mockImplementation(() => ({
+        getBlobClient: vi.fn().mockImplementation(function() { return {
           getProperties: mockGetProperties,
           download: mockBlobDownload,
-        })),
-      })),
-    })),
+        }; }),
+      }; }),
+    }; }),
   };
 });
 

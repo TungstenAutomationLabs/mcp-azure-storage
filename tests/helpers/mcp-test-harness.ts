@@ -7,6 +7,7 @@
  */
 
 import express from "express";
+import request from "supertest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
@@ -108,9 +109,8 @@ export function extractJsonRpcResponse(res: any): any {
  * MCP Streamable HTTP requires Accept: application/json, text/event-stream
  */
 export function mcpPost(app: express.Express, body: any) {
-  // Use dynamic import to avoid issues with supertest types
-  const supertest = require("supertest");
-  return supertest(app)
+  // supertest is imported at the top of the file
+  return request(app)
     .post("/mcp")
     .set("Content-Type", "application/json")
     .set("Accept", "application/json, text/event-stream")

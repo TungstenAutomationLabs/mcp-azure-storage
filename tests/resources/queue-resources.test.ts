@@ -5,7 +5,6 @@
  * at module scope, so mocks must be ready before module evaluation.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const { mockListQueues, mockGetProperties } = vi.hoisted(() => ({
   mockListQueues: vi.fn(),
@@ -14,13 +13,13 @@ const { mockListQueues, mockGetProperties } = vi.hoisted(() => ({
 
 vi.mock("@azure/storage-queue", () => {
   return {
-    StorageSharedKeyCredential: vi.fn().mockImplementation(() => ({})),
-    QueueServiceClient: vi.fn().mockImplementation(() => ({
+    StorageSharedKeyCredential: vi.fn().mockImplementation(function() { return {}; }),
+    QueueServiceClient: vi.fn().mockImplementation(function() { return {
       listQueues: mockListQueues,
-      getQueueClient: vi.fn().mockImplementation(() => ({
+      getQueueClient: vi.fn().mockImplementation(function() { return {
         getProperties: mockGetProperties,
-      })),
-    })),
+      }; }),
+    }; }),
   };
 });
 

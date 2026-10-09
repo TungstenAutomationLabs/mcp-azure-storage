@@ -7,7 +7,6 @@
  * All tests use tiny windows / limits so they complete in < 1 second.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express, { Request, Response, NextFunction } from "express";
 import rateLimit from "express-rate-limit";
 import crypto from "crypto";
