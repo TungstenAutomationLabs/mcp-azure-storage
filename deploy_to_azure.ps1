@@ -34,9 +34,13 @@
                Archive tier. Enables access-time tracking on the account.
 
 .PARAMETER EnableOTel
-    When set, provisions Application Insights and deploys an OTel Collector
-    sidecar container alongside the MCP server. The collector exports traces,
-    metrics and logs to App Insights via the azure_monitor exporter.
+    When set, forces OTel monitoring ON regardless of .env. If omitted, the
+    script reads ENABLE_OTEL from .env instead (true / false). When neither
+    the switch nor .env sets a value, OTel defaults to disabled.
+
+    Provisioning OTel deploys an OTel Collector sidecar container alongside
+    the MCP server. The collector exports traces, metrics and logs to App
+    Insights via the azure_monitor exporter.
 
     The script builds and pushes a custom collector image to ACR before
     running azd up. ACR must already exist (run a plain azd up first).
@@ -323,7 +327,21 @@ if ($LogRetentionDays -ne 30) {
 }
 
 # -- 5d. OTel monitoring configuration --
+# Resolve enablement: -EnableOTel switch overrides, then .env, then default off.
+# This avoids the footgun where omitting -EnableOTel on a code-only redeploy
+# silently disables a previously-enabled OTel deployment.
+$resolvedEnableOtel = $false
+$otelSource = "default"
+
 if ($EnableOTel) {
+    $resolvedEnableOtel = $true
+    $otelSource = "switch (-EnableOTel)"
+} elseif ($envVars.ContainsKey("ENABLE_OTEL") -and $envVars["ENABLE_OTEL"] -eq "true") {
+    $resolvedEnableOtel = $true
+    $otelSource = ".env (ENABLE_OTEL=true)"
+}
+
+if ($resolvedEnableOtel) {
     Write-Step "Building OTel Collector sidecar image"
 
     # Verify docker is available
@@ -386,10 +404,18 @@ if ($EnableOTel) {
 
     azd env set ENABLE_OTEL 'true' --no-prompt 2>$null
     azd env set OTEL_COLLECTOR_IMAGE $collectorImage --no-prompt 2>$null
-    Write-Ok "OTel monitoring: ENABLED (collector image pushed to ACR)"
+    Write-Ok "OTel monitoring: ENABLED via $otelSource (collector image pushed to ACR)"
 } else {
-    azd env set ENABLE_OTEL 'false' --no-prompt 2>$null
-    Write-Skip "OTel monitoring: disabled"
+    # Only write 'false' to azd env if ENABLE_OTEL was explicitly mentioned in
+    # .env (set to a non-true value like 'false' or empty). When .env omits the
+    # key entirely, leave the existing azd env value untouched so a previous
+    # -EnableOTel deployment is not silently reverted on code-only redeploys.
+    if ($envVars.ContainsKey("ENABLE_OTEL")) {
+        azd env set ENABLE_OTEL 'false' --no-prompt 2>$null
+        Write-Skip "OTel monitoring: disabled (ENABLE_OTEL=$($envVars['ENABLE_OTEL']) in .env)"
+    } else {
+        Write-Skip "OTel monitoring: unchanged (not set in .env or switch)"
+    }
 }
 
 # -- 6. Show summary before deploying --
@@ -416,8 +442,8 @@ switch ($LifecyclePolicy) {
     "one-way" { Write-Host "  Lifecycle Policy: One-way (Cold after 15d, Archive after 90d)"             -ForegroundColor White }
     "smart"   { Write-Host "  Lifecycle Policy: Smart (Cool after 30d inactivity, auto-reheat on access)" -ForegroundColor White }
 }
-if ($EnableOTel) {
-    Write-Host "  OTel Monitoring:  Enabled (collector sidecar + App Insights)" -ForegroundColor White
+if ($resolvedEnableOtel) {
+    Write-Host "  OTel Monitoring:  Enabled via $otelSource (collector sidecar + App Insights)" -ForegroundColor White
 } else {
     Write-Host "  OTel Monitoring:  Disabled" -ForegroundColor DarkGray
 }
@@ -455,7 +481,7 @@ if ($LASTEXITCODE -eq 0) {
     }
 
     # Show App Insights connection string when OTel is enabled
-    if ($EnableOTel) {
+    if ($resolvedEnableOtel) {
         $appiConnStr = azd env get-value appInsightsConnectionString 2>$null
         if ($appiConnStr) {
             $truncLen = [Math]::Min(40, $appiConnStr.Length)

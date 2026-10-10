@@ -3,9 +3,9 @@
 # All three signals land in ONE Application Insights resource,
 # correlated by operation_Id.
 #
-# Traces  -> azure_monitor  (App Insights "requests" + "dependencies")
-# Metrics -> azure_monitor  (App Insights "customMetrics")
-# Logs    -> azure_monitor  (App Insights "traces" + "exceptions")
+# Traces  -> azuremonitor  (App Insights "requests" + "dependencies")
+# Metrics -> azuremonitor  (App Insights "customMetrics")
+# Logs    -> azuremonitor  (App Insights "traces" + "exceptions")
 #
 # This config is deliberately minimal compared to the observability-test
 # spike.  Removed components and why:
@@ -53,10 +53,9 @@ processors:
       log_record:
         - 'severity_number < ${OTEL_LOG_MIN_SEVERITY}'
 
-  # Use the current component spelling (resource_detection, not
-  # resourcedetection).  The one-word alias still works but collector
-  # 0.160+ logs it as deprecated on startup (trap 8/18).
-  resource_detection:
+  # The collector-contrib 0.127.0 image requires the no-underscore
+  # spelling: resourcedetection (not resource_detection).
+  resourcedetection:
     detectors: [env]
     override: false
 
@@ -69,15 +68,14 @@ processors:
         action: upsert
 
 exporters:
-  # NOTE THE UNDERSCORE: azure_monitor, not azuremonitor.
-  # The latter is not a registered type and fails config validation,
-  # stopping the WHOLE collector (trap 1 from prompt 03).
+  # The collector-contrib 0.127.0 image requires the no-underscore
+  # spelling: azuremonitor (not azure_monitor).
   #
-  # CRITICAL (trap 2): APPLICATIONINSIGHTS_CONNECTION_STRING must have a
+  # CRITICAL: APPLICATIONINSIGHTS_CONNECTION_STRING must have a
   # non-empty value at collector startup.  An empty string kills the
   # entire collector at config-decode time.  The placeholder default is
   # set in the Docker/ACA environment definition, not here.
-  azure_monitor:
+  azuremonitor:
     connection_string: "${APPLICATIONINSIGHTS_CONNECTION_STRING}"
     # Routes span events to the App Insights "exceptions" table.
     # Off by default, which silently discards every recordException() call.
@@ -87,13 +85,13 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [resource_detection, resource/deployment_env, batch]
-      exporters: [azure_monitor]
+      processors: [resourcedetection, resource/deployment_env, batch]
+      exporters: [azuremonitor]
     metrics:
       receivers: [otlp]
-      processors: [resource_detection, resource/deployment_env, batch]
-      exporters: [azure_monitor]
+      processors: [resourcedetection, resource/deployment_env, batch]
+      exporters: [azuremonitor]
     logs:
       receivers: [otlp]
-      processors: [filter/logs, resource_detection, resource/deployment_env, batch]
-      exporters: [azure_monitor]
+      processors: [filter/logs, resourcedetection, resource/deployment_env, batch]
+      exporters: [azuremonitor]

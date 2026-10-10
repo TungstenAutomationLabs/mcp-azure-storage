@@ -1206,6 +1206,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 | `azd:test:provision` | `npm run azd:test:provision` | Provision test infrastructure only |
 | `azd:test:deploy` | `npm run azd:test:deploy` | Deploy app to test only (skip provision) |
 | -- | `.\deploy_to_azure.ps1` | Reads `.env`, syncs vars to azd env, runs `azd up` (add `-SkipProvision` for code-only deploy, `-LifecyclePolicy one-way\|smart` for auto-tiering) |
+| -- | `.\scripts\otel-verify.ps1` | Exercises all tool categories via MCP JSON-RPC to generate OTel telemetry (blob, queue, table, utility); includes error cases and cleanup. Use `-Endpoint` and `-ApiKey` or reads from azd env / `.env`. |
 
 ---
 
