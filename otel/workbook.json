@@ -175,7 +175,7 @@
           {
             "type": 1,
             "content": {
-              "json": "## Tools\nMCP tool call distribution, latency and error rates.\n\nThe `mcp.tool.name` attribute is set on the HTTP SERVER span by the\ntool error handler, so it appears in `requests.customDimensions`."
+              "json": "## Tools\nMCP tool call distribution, latency and error rates.\n\nThe `mcp.tool.name` attribute is set on an INTERNAL child span by the\ntool error handler, so it appears in `dependencies.customDimensions`."
             },
             "name": "tools-header"
           },
@@ -183,7 +183,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "requests\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Calls = count()\n    by Tool = tostring(customDimensions['mcp.tool.name'])\n| order by Calls desc",
+              "query": "dependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Calls = count()\n    by Tool = tostring(customDimensions['mcp.tool.name'])\n| order by Calls desc",
               "size": 0,
               "title": "Tool Call Distribution",
               "timeContextFromParameter": "TimeRange",
@@ -201,7 +201,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "requests\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Calls = count(),\n            ['Avg (ms)'] = round(avg(duration), 1),\n            ['P50 (ms)'] = round(percentile(duration, 50), 1),\n            ['P95 (ms)'] = round(percentile(duration, 95), 1),\n            Errors = countif(tobool(success) == false)\n    by Tool = tostring(customDimensions['mcp.tool.name'])\n| order by Calls desc",
+              "query": "dependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Calls = count(),\n            ['Avg (ms)'] = round(avg(duration), 1),\n            ['P50 (ms)'] = round(percentile(duration, 50), 1),\n            ['P95 (ms)'] = round(percentile(duration, 95), 1),\n            Errors = countif(tobool(success) == false)\n    by Tool = tostring(customDimensions['mcp.tool.name'])\n| order by Calls desc",
               "size": 0,
               "title": "Tool Latency",
               "timeContextFromParameter": "TimeRange",
@@ -219,7 +219,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "let bin_ = {TimeRange:grain};\nrequests\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Total = count(), Errors = countif(tobool(success) == false)\n    by bin(timestamp, bin_),\n       Tool = tostring(customDimensions['mcp.tool.name'])\n| extend ['Error %'] = round(100.0 * Errors / Total, 1)\n| project timestamp, Tool, ['Error %']\n| render timechart",
+              "query": "let bin_ = {TimeRange:grain};\ndependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Total = count(), Errors = countif(tobool(success) == false)\n    by bin(timestamp, bin_),\n       Tool = tostring(customDimensions['mcp.tool.name'])\n| extend ['Error %'] = round(100.0 * Errors / Total, 1)\n| project timestamp, Tool, ['Error %']\n| render timechart",
               "size": 0,
               "title": "Tool Error Rate Over Time",
               "timeContextFromParameter": "TimeRange",
@@ -247,7 +247,7 @@
           {
             "type": 1,
             "content": {
-              "json": "## Data Volume\nRequest counts by tool, blob payload sizes and daily transfer.\n\nPayload sizes come from the `blob.content_length` attribute set on\nthe HTTP SERVER span by the tool error handler for `blob-create` calls."
+              "json": "## Data Volume\nRequest counts by tool, blob payload sizes and daily transfer.\n\nPayload sizes come from the `blob.content_length` attribute set on\nthe INTERNAL child span by the tool error handler for `blob-create` calls."
             },
             "name": "data-volume-header"
           },
@@ -255,7 +255,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "let bin_ = {TimeRange:grain};\nrequests\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Calls = count()\n    by bin(timestamp, bin_),\n       Tool = tostring(customDimensions['mcp.tool.name'])\n| render timechart",
+              "query": "let bin_ = {TimeRange:grain};\ndependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Calls = count()\n    by bin(timestamp, bin_),\n       Tool = tostring(customDimensions['mcp.tool.name'])\n| render timechart",
               "size": 0,
               "title": "Request Counts by Tool and Period",
               "timeContextFromParameter": "TimeRange",
@@ -269,7 +269,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "requests\n| where timestamp > ago({TimeRange:seconds}s)\n| where tostring(customDimensions['mcp.tool.name']) startswith 'blob-'\n| extend PayloadBytes = tolong(tostring(customDimensions['blob.content_length']))\n| where PayloadBytes > 0\n| summarize ['Total MB'] = round(sum(PayloadBytes) / 1048576.0, 2),\n            ['Avg KB'] = round(avg(PayloadBytes) / 1024.0, 1),\n            ['Max KB'] = round(max(PayloadBytes) / 1024.0, 1),\n            Operations = count()\n    by Tool = tostring(customDimensions['mcp.tool.name'])\n| order by ['Total MB'] desc",
+              "query": "dependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where tostring(customDimensions['mcp.tool.name']) startswith 'blob-'\n| extend PayloadBytes = tolong(tostring(customDimensions['blob.content_length']))\n| where PayloadBytes > 0\n| summarize ['Total MB'] = round(sum(PayloadBytes) / 1048576.0, 2),\n            ['Avg KB'] = round(avg(PayloadBytes) / 1024.0, 1),\n            ['Max KB'] = round(max(PayloadBytes) / 1024.0, 1),\n            Operations = count()\n    by Tool = tostring(customDimensions['mcp.tool.name'])\n| order by ['Total MB'] desc",
               "size": 0,
               "title": "Blob Payload Sizes",
               "timeContextFromParameter": "TimeRange",
@@ -287,7 +287,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "requests\n| where timestamp > ago({TimeRange:seconds}s)\n| where tostring(customDimensions['mcp.tool.name']) startswith 'blob-'\n| extend PayloadBytes = tolong(tostring(customDimensions['blob.content_length']))\n| where PayloadBytes > 0\n| summarize ['Total MB'] = round(sum(PayloadBytes) / 1048576.0, 2),\n            Operations = count()\n    by bin(timestamp, 1d)\n| render timechart",
+              "query": "dependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where tostring(customDimensions['mcp.tool.name']) startswith 'blob-'\n| extend PayloadBytes = tolong(tostring(customDimensions['blob.content_length']))\n| where PayloadBytes > 0\n| summarize ['Total MB'] = round(sum(PayloadBytes) / 1048576.0, 2),\n            Operations = count()\n    by bin(timestamp, 1d)\n| render timechart",
               "size": 0,
               "title": "Daily Data Transfer",
               "timeContextFromParameter": "TimeRange",

@@ -16,7 +16,7 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { trace } from "@opentelemetry/api";
+import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 
 // ── Structured error shape ───────────────────────────────────────────────────
 
@@ -429,44 +429,61 @@ export function wrapToolErrorHandler(server: McpServer): void {
     const handler = args[args.length - 1];
     if (typeof handler === "function") {
       const wrappedHandler = async (...handlerArgs: unknown[]) => {
-        // Enrich the active OTel span with tool metadata.
-        // trace.getActiveSpan() returns undefined when no SDK is loaded,
-        // so this is a safe no-op without OTel.
-        const span = trace.getActiveSpan();
-        if (span && toolName) {
-          span.setAttribute("mcp.tool.name", toolName);
-          span.setAttribute("peer.service", "azure-storage");
-        }
+        // Create a new INTERNAL child span for each tool call.
+        // The MCP SDK's JSON-RPC dispatch breaks AsyncLocalStorage context,
+        // so trace.getActiveSpan() returns undefined inside tool handlers.
+        // By creating our own span we ensure mcp.tool.name always appears
+        // in the dependencies table in Azure Monitor.
+        // When no OTel SDK is loaded, trace.getTracer() returns a no-op
+        // tracer that creates no-op spans -- this is safe.
+        const tracer = trace.getTracer("mcp-azure-storage");
+        const spanName = toolName ? `tool:${toolName}` : "tool:unknown";
 
-        try {
-          const result = await (handler as Function).apply(null, handlerArgs);
+        return tracer.startActiveSpan(spanName, { kind: SpanKind.INTERNAL }, async (span) => {
+          try {
+            // Set tool metadata on the new span.
+            if (toolName) {
+              span.setAttribute("mcp.tool.name", toolName);
+              span.setAttribute("peer.service", "azure-storage");
+            }
 
-          // Blob-specific span enrichment: set container, blob name, and
-          // content length (when known) from the handler parameters.
-          if (span && toolName?.startsWith("blob-")) {
-            const params = handlerArgs[0] as Record<string, unknown> | undefined;
-            if (params && typeof params === "object") {
-              if (typeof params.containerName === "string") {
-                span.setAttribute("blob.container_name", params.containerName);
-              }
-              if (typeof params.blobName === "string") {
-                span.setAttribute("blob.name", params.blobName);
-              }
-              // Estimate content length from base64 payload (blob-create).
-              if (typeof params.contentBase64 === "string") {
-                const b64Len = params.contentBase64.length;
-                // Base64 encodes 3 bytes into 4 chars; approximate decoded size.
-                const approxBytes = Math.floor((b64Len * 3) / 4);
-                span.setAttribute("blob.content_length", approxBytes);
+            const result = await (handler as Function).apply(null, handlerArgs);
+
+            // Blob-specific span enrichment: set container, blob name, and
+            // content length (when known) from the handler parameters.
+            if (toolName?.startsWith("blob-")) {
+              const params = handlerArgs[0] as Record<string, unknown> | undefined;
+              if (params && typeof params === "object") {
+                if (typeof params.containerName === "string") {
+                  span.setAttribute("blob.container_name", params.containerName);
+                }
+                if (typeof params.blobName === "string") {
+                  span.setAttribute("blob.name", params.blobName);
+                }
+                // Estimate content length from base64 payload (blob-create).
+                if (typeof params.contentBase64 === "string") {
+                  const b64Len = params.contentBase64.length;
+                  // Base64 encodes 3 bytes into 4 chars; approximate decoded size.
+                  const approxBytes = Math.floor((b64Len * 3) / 4);
+                  span.setAttribute("blob.content_length", approxBytes);
+                }
               }
             }
-          }
 
-          return result;
-        } catch (err: unknown) {
-          const structured = mapRestError(err);
-          throw new Error(JSON.stringify({ error: structured }));
-        }
+            span.setStatus({ code: SpanStatusCode.OK });
+            return result;
+          } catch (err: unknown) {
+            const structured = mapRestError(err);
+            const errMsg = structured.message || "Tool handler error";
+            span.setStatus({ code: SpanStatusCode.ERROR, message: errMsg });
+            if (err instanceof Error) {
+              span.recordException(err);
+            }
+            throw new Error(JSON.stringify({ error: structured }));
+          } finally {
+            span.end();
+          }
+        });
       };
       args[args.length - 1] = wrappedHandler;
     }

@@ -51,6 +51,7 @@ import { registerFileShareResources } from "./resources/fileshare-resources.js";
 import { registerQueueResources } from "./resources/queue-resources.js";
 import { registerTableResources } from "./resources/table-resources.js";
 import { parseDisabledTools, buildDisabledToolError } from "./utils/disabled-tools.js";
+import { info, warn, error as logError, debug } from "./utils/otel-logger.js";
 
 // Re-export for backward compatibility (tests, external consumers)
 export { parseDisabledTools, buildDisabledToolError } from "./utils/disabled-tools.js";
@@ -355,7 +356,7 @@ function validateDisabledToolNames(): void {
 
   for (const disabled of disabledToolNames) {
     if (!knownTools.has(disabled)) {
-      console.warn(`⚠️  DISABLED_TOOLS contains unknown tool name: '${disabled}'`);
+      warn(`DISABLED_TOOLS contains unknown tool name: '${disabled}'`, { tool: disabled });
     }
   }
 
@@ -393,7 +394,7 @@ const sessionCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [sid, session] of sessions) {
     if (now - session.lastActivity > SESSION_TTL_MS) {
-      console.log(`Session ${sid} expired after ${SESSION_TTL_MS / 60000}min inactivity — cleaning up`);
+      info(`Session expired after ${SESSION_TTL_MS / 60000}min inactivity -- cleaning up`, { sessionId: sid });
       try { session.server.close(); } catch { /* ignore */ }
       sessions.delete(sid);
     }
@@ -450,7 +451,7 @@ app.post("/mcp", async (req: Request, res: Response) => {
       await session.transport.handleRequest(req, res, req.body);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Internal error";
-      console.error("MCP session request error:", error);
+      logError("MCP session request error", { error: message });
       if (!res.headersSent) {
         res.status(500).json({
           jsonrpc: "2.0",
@@ -506,7 +507,7 @@ app.post("/mcp", async (req: Request, res: Response) => {
       const sid = transport.sessionId;
       if (sid && sessions.has(sid)) {
         sessions.delete(sid);
-        console.log(`Session ${sid} closed and cleaned up`);
+        info("Session closed and cleaned up", { sessionId: sid });
       }
     };
 
@@ -517,11 +518,11 @@ app.post("/mcp", async (req: Request, res: Response) => {
       const sid = transport.sessionId;
       if (sid) {
         sessions.set(sid, { transport, server: mcpServer, lastActivity: Date.now() });
-        console.log(`New session created: ${sid}`);
+        info("New session created", { sessionId: sid });
       }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Internal error";
-      console.error("MCP initialize error:", error);
+      logError("MCP initialize error", { error: message });
       try { await mcpServer.close(); } catch { /* ignore */ }
       if (!res.headersSent) {
         res.status(500).json({
@@ -546,7 +547,7 @@ app.post("/mcp", async (req: Request, res: Response) => {
     await transport.handleRequest(req, res, req.body);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal error";
-    console.error("MCP stateless request error:", error);
+    logError("MCP stateless request error", { error: message });
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: "2.0",
@@ -607,7 +608,7 @@ app.get("/mcp", async (req: Request, res: Response) => {
   } catch (error: unknown) {
     clearInterval(keepaliveTimer);
     const message = error instanceof Error ? error.message : "Internal error";
-    console.error("SSE stream error:", error);
+    logError("SSE stream error", { error: message });
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: "2.0",
@@ -642,10 +643,10 @@ app.delete("/mcp", async (req: Request, res: Response) => {
     await session.transport.handleRequest(req, res);
     await session.server.close();
     sessions.delete(sessionId);
-    console.log(`Session ${sessionId} terminated by client`);
+    info("Session terminated by client", { sessionId });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Internal error";
-    console.error("Session close error:", error);
+    logError("Session close error", { error: message });
     sessions.delete(sessionId);
     if (!res.headersSent) {
       res.status(500).json({
@@ -1023,7 +1024,7 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
         return;
       }
 
-      console.error("Upload error:", error);
+      logError("Upload error", { error: message });
       if (!res.headersSent) {
         const isTimeout = message.includes("timeout") || message.includes("ETIMEDOUT");
         const status = isTimeout ? 504 : 500;
@@ -1042,7 +1043,7 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
     if (responded) return;
     responded = true;
     filePassThrough?.destroy(err);
-    console.error("Busboy parse error:", err);
+    logError("Busboy parse error", { error: err.message });
     if (!res.headersSent) {
       res.status(400).json({ error: `Multipart parse error: ${err.message}` });
     }
