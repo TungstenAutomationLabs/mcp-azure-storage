@@ -418,6 +418,24 @@ if ($resolvedEnableOtel) {
     }
 }
 
+# -- 5e. OTel telemetry level and log severity --
+# Read from .env or default to 'detailed' / '9' (INFO).
+$otelTelemetryLevel = if ($envVars.ContainsKey("OTEL_TELEMETRY_LEVEL") -and -not [string]::IsNullOrEmpty($envVars["OTEL_TELEMETRY_LEVEL"])) {
+    $envVars["OTEL_TELEMETRY_LEVEL"]
+} else {
+    'detailed'
+}
+azd env set OTEL_TELEMETRY_LEVEL $otelTelemetryLevel --no-prompt 2>$null
+Write-Ok "OTel telemetry level: $otelTelemetryLevel"
+
+$otelLogMinSeverity = if ($envVars.ContainsKey("OTEL_LOG_MIN_SEVERITY") -and -not [string]::IsNullOrEmpty($envVars["OTEL_LOG_MIN_SEVERITY"])) {
+    $envVars["OTEL_LOG_MIN_SEVERITY"]
+} else {
+    '9'
+}
+azd env set OTEL_LOG_MIN_SEVERITY $otelLogMinSeverity --no-prompt 2>$null
+Write-Ok "OTel log min severity: $otelLogMinSeverity"
+
 # -- 6. Show summary before deploying --
 Write-Step "Deployment summary"
 Write-Host "  Environment:     $($currentEnv.Name)" -ForegroundColor White
@@ -448,6 +466,8 @@ if ($resolvedEnableOtel) {
     Write-Host "  OTel Monitoring:  Disabled" -ForegroundColor DarkGray
 }
 Write-Host "  Log Retention:   $LogRetentionDays days" -ForegroundColor White
+Write-Host "  OTel Level:      $otelTelemetryLevel" -ForegroundColor White
+Write-Host "  OTel Log Filter: severity >= $otelLogMinSeverity" -ForegroundColor White
 
 # -- 7. Confirm --
 Write-Host ""

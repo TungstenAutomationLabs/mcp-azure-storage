@@ -1089,6 +1089,18 @@ When OTel is enabled, an Azure Workbook is deployed with four tabs:
 - **Data Volume** -- Blob payload sizes, daily data transfer, request counts by tool
 - **Logs** -- Severity distribution, correlated log stream
 
+#### Application Insights Overview
+
+![Application Insights Overview](img/ApplicationInsights-Overview.png)
+
+*The Overview tab showing request volume tiles, request rate over time, and latency percentile charts (P50/P90/P99).*
+
+#### Tools Breakdown
+
+![Application Insights Tools](img/ApplicationInsights-Tools.png)
+
+*The Tools tab showing per-tool call distribution, latency table, and error rate over time.*
+
 ### Alert Rules
 
 Two warning-level alert rules are created (no notifications by default):

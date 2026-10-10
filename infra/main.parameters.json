@@ -31,6 +31,12 @@
     },
     "logRetentionDays": {
       "value": "${LOG_RETENTION_DAYS=30}"
+    },
+    "otelTelemetryLevel": {
+      "value": "${OTEL_TELEMETRY_LEVEL}"
+    },
+    "otelLogMinSeverity": {
+      "value": "${OTEL_LOG_MIN_SEVERITY}"
     }
   }
 }

@@ -10,8 +10,8 @@
  *
  * Telemetry level control via OTEL_TELEMETRY_LEVEL:
  *   off      -- same as not setting the endpoint
- *   basic    -- 10% trace sampling, 60s metrics, WARN+ logs (default)
- *   detailed -- 100% trace sampling, 15s metrics, INFO+ logs
+ *   basic    -- 10% trace sampling, 60s metrics, WARN+ logs
+ *   detailed -- 100% trace sampling, 15s metrics, INFO+ logs (default)
  *   full     -- always_on sampler, 5s metrics, no log filter
  *
  * @module instrumentation
@@ -28,7 +28,7 @@ if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
 
 // ── Telemetry level ──────────────────────────────────────────────────────────
 
-const level = (process.env.OTEL_TELEMETRY_LEVEL || 'basic').toLowerCase();
+const level = (process.env.OTEL_TELEMETRY_LEVEL || 'detailed').toLowerCase();
 
 if (level === 'off') {
   // Explicitly disabled -- exit with zero overhead.

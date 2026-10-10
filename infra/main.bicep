@@ -107,6 +107,12 @@ param logRetentionDays int = 30
 // when enableOtel is false (the image is never referenced).
 param otelCollectorImage string = ''
 
+@description('OTel telemetry level: off, basic, detailed, full')
+param otelTelemetryLevel string = 'detailed'
+
+@description('Minimum log severity for the OTel Collector log filter (9=INFO, 13=WARN)')
+param otelLogMinSeverity string = '9'
+
 // Computed flag: true when the user is bringing their own storage account.
 var useExistingStorage = !empty(existingStorageAccountName) && !empty(existingStorageAccountKey)
 
@@ -623,7 +629,7 @@ var otelInstrumentationEnv = [
   }
   {
     name: 'OTEL_TELEMETRY_LEVEL'
-    value: 'basic'
+    value: otelTelemetryLevel
   }
 ]
 
@@ -656,9 +662,9 @@ var otelCollectorContainer = {
     }
     {
       // Collector log severity: WARN=13, INFO=9, DEBUG=5.
-      // Default to WARN to keep sidecar logs quiet.
+      // Configurable via otelLogMinSeverity parameter.
       name: 'OTEL_LOG_MIN_SEVERITY'
-      value: '13'
+      value: otelLogMinSeverity
     }
     {
       name: 'OTEL_DEPLOYMENT_ENV'
