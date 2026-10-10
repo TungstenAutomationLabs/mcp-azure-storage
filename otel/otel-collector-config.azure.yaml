@@ -1,0 +1,99 @@
+# OpenTelemetry Collector configuration -- Azure Monitor
+#
+# All three signals land in ONE Application Insights resource,
+# correlated by operation_Id.
+#
+# Traces  -> azure_monitor  (App Insights "requests" + "dependencies")
+# Metrics -> azure_monitor  (App Insights "customMetrics")
+# Logs    -> azure_monitor  (App Insights "traces" + "exceptions")
+#
+# This config is deliberately minimal compared to the observability-test
+# spike.  Removed components and why:
+#
+#   docker_stats receiver      -- ACA sidecar has no Docker socket
+#   host_metrics receiver      -- No APM-to-Infra correlation in App Insights;
+#                                 per-core/per-mount data points each become
+#                                 billable customMetrics rows
+#   gen_ai_normalizer processor -- No LLM instrumentation in this project
+#   spanmetrics connector      -- Azure does not need it; every CLIENT/INTERNAL
+#                                 span becomes a "dependencies" row with native
+#                                 duration, so KQL percentiles work directly
+#   transform/azure_dims proc  -- No container labels in ACA
+#   cumulative_to_delta proc   -- Removed; the app SDK already exports delta
+#                                 temporality via OTEL_EXPORTER_OTLP_METRICS_
+#                                 TEMPORALITY_PREFERENCE=delta
+#
+# Validate locally (step 12):
+#
+#   docker run --rm \
+#     -v "$(pwd)/otel-collector-config.azure.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+#     -e APPLICATIONINSIGHTS_CONNECTION_STRING='InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://localhost/' \
+#     -e OTEL_LOG_MIN_SEVERITY=13 \
+#     -e OTEL_DEPLOYMENT_ENV=dev \
+#     otel/opentelemetry-collector-contrib:0.127.0 validate --config /etc/otelcol-contrib/config.yaml
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+  # Drop log records below the configured severity threshold.
+  # Default SEVERITY_NUMBER_WARN (13) keeps only WARN, ERROR, FATAL.
+  # Set OTEL_LOG_MIN_SEVERITY to SEVERITY_NUMBER_INFO (9) for more detail,
+  # or SEVERITY_NUMBER_DEBUG (5) for everything (expensive).
+  filter/logs:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'severity_number < ${OTEL_LOG_MIN_SEVERITY}'
+
+  # Use the current component spelling (resource_detection, not
+  # resourcedetection).  The one-word alias still works but collector
+  # 0.160+ logs it as deprecated on startup (trap 8/18).
+  resource_detection:
+    detectors: [env]
+    override: false
+
+  # Stamp deployment.environment as a resource attribute so that
+  # App Insights can distinguish dev / staging / production data.
+  resource/deployment_env:
+    attributes:
+      - key: deployment.environment
+        value: "${OTEL_DEPLOYMENT_ENV}"
+        action: upsert
+
+exporters:
+  # NOTE THE UNDERSCORE: azure_monitor, not azuremonitor.
+  # The latter is not a registered type and fails config validation,
+  # stopping the WHOLE collector (trap 1 from prompt 03).
+  #
+  # CRITICAL (trap 2): APPLICATIONINSIGHTS_CONNECTION_STRING must have a
+  # non-empty value at collector startup.  An empty string kills the
+  # entire collector at config-decode time.  The placeholder default is
+  # set in the Docker/ACA environment definition, not here.
+  azure_monitor:
+    connection_string: "${APPLICATIONINSIGHTS_CONNECTION_STRING}"
+    # Routes span events to the App Insights "exceptions" table.
+    # Off by default, which silently discards every recordException() call.
+    spaneventsenabled: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resource_detection, resource/deployment_env, batch]
+      exporters: [azure_monitor]
+    metrics:
+      receivers: [otlp]
+      processors: [resource_detection, resource/deployment_env, batch]
+      exporters: [azure_monitor]
+    logs:
+      receivers: [otlp]
+      processors: [filter/logs, resource_detection, resource/deployment_env, batch]
+      exporters: [azure_monitor]

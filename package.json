@@ -1,6 +1,6 @@
 {
   "name": "mcp-azure-storage",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "MCP server for Azure Storage -- Blob, Queue, Table, and File Share",
   "type": "module",
   "main": "dist/server.js",
@@ -8,7 +8,7 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"const fs=require('fs');['instrumentation.cjs','session-attributes.cjs'].forEach(f=>fs.copyFileSync('src/'+f,'dist/'+f))\"",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "test": "vitest run",
@@ -43,6 +43,16 @@
     "@azure/storage-file-share": "^12.30.0",
     "@azure/storage-queue": "^12.29.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/auto-instrumentations-node": "^0.79.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-logs": "^0.221.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0",
     "busboy": "^1.6.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.0",

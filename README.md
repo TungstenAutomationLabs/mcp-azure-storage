@@ -1044,6 +1044,92 @@ azd down --purge
 
 ---
 
+## OpenTelemetry Monitoring
+
+Version 1.2 adds opt-in OpenTelemetry observability. When enabled, traces, metrics, and logs are exported to Azure Monitor / Application Insights via an OTel Collector sidecar.
+
+**Default behaviour is unchanged** -- OTel activates only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Without it, the server runs exactly as before with zero overhead.
+
+### Architecture
+
+```
+MCP Server  --OTLP/HTTP-->  OTel Collector  --azure_monitor-->  Application Insights
+(Express)                   (sidecar)                           (Log Analytics Workspace)
+```
+
+All three signals (traces, metrics, logs) land in a single Application Insights resource, correlated by `operation_Id`.
+
+### Enabling on Azure
+
+```powershell
+.\deploy_to_azure.ps1 -EnableOTel
+```
+
+This provisions Application Insights, builds the OTel Collector sidecar image, and deploys both containers to Azure Container Apps.
+
+### Telemetry Levels
+
+Control data volume and cost via `OTEL_TELEMETRY_LEVEL`:
+
+| Level | Traces | Metrics | Logs | Estimated cost |
+|-------|--------|---------|------|----------------|
+| `off` | None | None | None | Zero |
+| `basic` (default) | 10% sampled | 60s interval | WARN+ only | ~$1-4/mo |
+| `detailed` | 100% | 15s interval | INFO+ | ~$5-20/mo |
+| `full` | All + internal | 5s interval | All incl. DEBUG | ~$20-100+/mo |
+
+Cost depends on request volume. The first 5 GB/month of Application Insights data ingestion is free.
+
+### Dashboard
+
+When OTel is enabled, an Azure Workbook is deployed with four tabs:
+
+- **Overview** -- Request rate, error rate, latency percentiles (P50/P90/P99)
+- **Tools** -- Per-tool call distribution, latency breakdown, error rates
+- **Data Volume** -- Blob payload sizes, daily data transfer, request counts by tool
+- **Logs** -- Severity distribution, correlated log stream
+
+### Alert Rules
+
+Two warning-level alert rules are created (no notifications by default):
+
+- **High Error Rate** -- Fires when error rate exceeds 10% over two consecutive 5-minute windows
+- **Latency Degradation** -- Fires when P95 latency exceeds 3 standard deviations above the 1-hour baseline
+
+### Local Development
+
+For local OTel testing, run a collector container and set the endpoint:
+
+```bash
+# Start collector (requires otel-collector-config.azure.yaml and a connection string)
+docker run -d --name otel-collector \
+  -p 4318:4318 \
+  -e APPLICATIONINSIGHTS_CONNECTION_STRING="your-connection-string" \
+  -e OTEL_LOG_MIN_SEVERITY=13 \
+  -e OTEL_DEPLOYMENT_ENV=dev \
+  -v $(pwd)/otel/otel-collector-config.azure.yaml:/etc/otelcol-contrib/config.yaml:ro \
+  otel/opentelemetry-collector-contrib:0.127.0
+
+# Set the endpoint in .env
+echo "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" >> .env
+```
+
+### Standalone Monitoring Setup
+
+To provision Azure Monitor resources independently of the main deployment:
+
+```powershell
+.\scripts\setup-monitoring.ps1 -ResourceGroup "my-rg" -AppInsightsName "my-appi"
+```
+
+To verify telemetry is arriving:
+
+```powershell
+.\scripts\setup-monitoring.ps1 -ResourceGroup "my-rg" -AppInsightsName "my-appi" -VerifyOnly
+```
+
+---
+
 ## Configuration Reference
 
 | Variable | Required | Default | Description |
@@ -1125,7 +1211,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 
 ## Testing
 
-### Unit Tests (285 tests, no Azure required)
+### Unit Tests (312 tests, no Azure required)
 
 Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
 

@@ -16,6 +16,7 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { trace } from "@opentelemetry/api";
 
 // ── Structured error shape ───────────────────────────────────────────────────
 
@@ -421,12 +422,47 @@ export function wrapToolErrorHandler(server: McpServer): void {
   const origTool = server.tool.bind(server);
 
   (server as any).tool = function patchedTool(...args: unknown[]) {
+    // The first argument is always the tool name string.
+    const toolName = typeof args[0] === "string" ? args[0] : undefined;
+
     // The last argument is always the handler callback.
     const handler = args[args.length - 1];
     if (typeof handler === "function") {
       const wrappedHandler = async (...handlerArgs: unknown[]) => {
+        // Enrich the active OTel span with tool metadata.
+        // trace.getActiveSpan() returns undefined when no SDK is loaded,
+        // so this is a safe no-op without OTel.
+        const span = trace.getActiveSpan();
+        if (span && toolName) {
+          span.setAttribute("mcp.tool.name", toolName);
+          span.setAttribute("peer.service", "azure-storage");
+        }
+
         try {
-          return await (handler as Function).apply(null, handlerArgs);
+          const result = await (handler as Function).apply(null, handlerArgs);
+
+          // Blob-specific span enrichment: set container, blob name, and
+          // content length (when known) from the handler parameters.
+          if (span && toolName?.startsWith("blob-")) {
+            const params = handlerArgs[0] as Record<string, unknown> | undefined;
+            if (params && typeof params === "object") {
+              if (typeof params.containerName === "string") {
+                span.setAttribute("blob.container_name", params.containerName);
+              }
+              if (typeof params.blobName === "string") {
+                span.setAttribute("blob.name", params.blobName);
+              }
+              // Estimate content length from base64 payload (blob-create).
+              if (typeof params.contentBase64 === "string") {
+                const b64Len = params.contentBase64.length;
+                // Base64 encodes 3 bytes into 4 chars; approximate decoded size.
+                const approxBytes = Math.floor((b64Len * 3) / 4);
+                span.setAttribute("blob.content_length", approxBytes);
+              }
+            }
+          }
+
+          return result;
         } catch (err: unknown) {
           const structured = mapRestError(err);
           throw new Error(JSON.stringify({ error: structured }));

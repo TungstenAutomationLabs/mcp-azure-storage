@@ -278,7 +278,7 @@ app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
 function createMcpServer(): McpServer {
   const server = new McpServer({
     name: "azure-storage-mcp",
-    version: "1.0.0",
+    version: "1.2.0",
   });
 
   // ── Structured error wrapper ───────────────────────────────────────────
@@ -1063,7 +1063,7 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
 // ── Start HTTP server ────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const httpServer = app.listen(PORT, () => {
-  console.log(`\n🚀 MCP Azure Storage Server v1.0.0`);
+  console.log(`\n🚀 MCP Azure Storage Server v1.2.0`);
   console.log(`   MCP endpoint : http://localhost:${PORT}/mcp`);
   console.log(`   Upload       : http://localhost:${PORT}/upload`);
   console.log(`   Health check : http://localhost:${PORT}/health`);

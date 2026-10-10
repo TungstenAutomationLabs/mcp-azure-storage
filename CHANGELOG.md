@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] -- 2026-10-09
+
+### Added
+
+- **OpenTelemetry monitoring** -- Opt-in observability via OTel Collector sidecar
+  - Traces, metrics, and logs exported to Azure Monitor / Application Insights
+  - Activation guard: zero overhead when `OTEL_EXPORTER_OTLP_ENDPOINT` is not set
+  - Telemetry level control (`OTEL_TELEMETRY_LEVEL`): `off`, `basic` (default), `detailed`, `full`
+  - Fine-grained cost controls: trace sampling ratio, metrics interval, log severity threshold
+  - Session ID (`mcp-session-id` header) propagated to server spans for dashboard slicing
+  - Tool span enrichment: `mcp.tool.name`, `peer.service`, blob operation attributes
+  - Structured OTel logger with trace-to-log correlation
+
+- **OTel Collector configuration** (`otel/`)
+  - Azure Monitor-only config (`otel-collector-config.azure.yaml`)
+  - Custom collector Dockerfile for ACA sidecar deployment
+  - Addresses 20 traps from the observability-test spike project
+
+- **Azure infrastructure** (`infra/main.bicep`)
+  - Application Insights resource (conditional on `enableOtel`)
+  - OTel Collector sidecar container in Container App
+  - Configurable log retention (`logRetentionDays`, 30-730 days)
+  - Azure Workbook with 4 tabs: Overview, Tools, Data Volume, Logs
+  - Alert rules: high error rate and latency degradation (warning-only)
+
+- **Deploy script** (`deploy_to_azure.ps1`)
+  - `-EnableOTel` switch: provisions App Insights + builds/pushes collector image
+  - `-LogRetentionDays` parameter (default 30)
+
+- **Monitoring setup script** (`scripts/setup-monitoring.ps1`)
+  - Standalone provisioning of App Insights and Log Analytics workspace
+  - KQL verification queries for all five App Insights tables
+  - `-VerifyOnly` mode for post-deployment validation
+
+### Breaking Changes
+
+None -- all changes are additive. OTel is disabled by default.
+
+### Migration Notes
+
+- **New environment variables** (all optional):
+
+  | Variable | Default | Description |
+  |----------|---------|-------------|
+  | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset)_ | Activates OTel when set |
+  | `OTEL_TELEMETRY_LEVEL` | `basic` | Controls data volume: off/basic/detailed/full |
+  | `OTEL_SERVICE_NAME` | `mcp-azure-storage` | Service name in traces |
+  | `OTEL_TRACES_SAMPLER_ARG` | `0.1` | Trace sampling ratio (0.0-1.0) |
+  | `OTEL_METRICS_EXPORT_INTERVAL_MS` | `60000` | Metric export interval |
+  | `OTEL_LOG_MIN_SEVERITY` | `WARN` | Minimum log severity for export |
+
+- **New deploy script parameters**:
+  - `-EnableOTel` -- Provisions OTel infrastructure
+  - `-LogRetentionDays` -- Data retention period (30-730 days)
+
+- Test count increases from 285 to **312** (27 new OTel-related tests).
+
 ## [1.1.0] — 2026-10-07
 
 ### Added

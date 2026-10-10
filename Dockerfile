@@ -24,9 +24,12 @@ COPY package*.json ./
 RUN npm ci
 
 # Copy TypeScript config and source, then compile.
+# Also copy .cjs files (plain JS, not compiled by tsc) to dist/.
 COPY tsconfig.json ./
 COPY src/ ./src/
-RUN npx tsc
+RUN npx tsc \
+    && cp src/instrumentation.cjs dist/ \
+    && cp src/session-attributes.cjs dist/
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — minimal production image
@@ -56,5 +59,7 @@ ENV NODE_ENV=production
 ENV PORT=3000
 EXPOSE 3000
 
-# Start the MCP server. No shell form — exec form avoids PID 1 signal issues.
-CMD ["node", "dist/server.js"]
+# Start the MCP server. No shell form -- exec form avoids PID 1 signal issues.
+# --require loads OTel instrumentation before any ESM code.
+# When OTEL_EXPORTER_OTLP_ENDPOINT is unset the require exits immediately.
+CMD ["node", "--require", "./dist/instrumentation.cjs", "dist/server.js"]

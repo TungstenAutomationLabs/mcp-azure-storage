@@ -1,0 +1,382 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "a0e1f5b2-c3d4-4e5f-6a7b-8c9d0e1f2a3b",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 3600000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 300000 },
+                { "durationMs": 900000 },
+                { "durationMs": 1800000 },
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 43200000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 259200000 },
+                { "durationMs": 604800000 }
+              ]
+            },
+            "label": "Time Range"
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.insights/components"
+      },
+      "name": "parameters - time range"
+    },
+    {
+      "type": 11,
+      "content": {
+        "version": "LinkItem/1.0",
+        "style": "tabs",
+        "links": [
+          {
+            "id": "tab-overview",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Overview",
+            "subTarget": "Overview",
+            "preText": "",
+            "style": "link"
+          },
+          {
+            "id": "tab-tools",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Tools",
+            "subTarget": "Tools",
+            "style": "link"
+          },
+          {
+            "id": "tab-data-volume",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Data Volume",
+            "subTarget": "DataVolume",
+            "style": "link"
+          },
+          {
+            "id": "tab-logs",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Logs",
+            "subTarget": "Logs",
+            "style": "link"
+          }
+        ]
+      },
+      "name": "tabs"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": 0,
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## Overview\nRequest volume, error rates and latency percentiles."
+            },
+            "name": "overview-header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "requests\n| where timestamp > ago({TimeRange:seconds}s)\n| summarize Total = count(),\n            Failed = countif(tobool(success) == false),\n            AvgMs = round(avg(duration), 1),\n            P95Ms = round(percentile(duration, 95), 1)\n| project Metric = 'Total Requests', Value = tostring(Total)\n| union (\n    requests\n    | where timestamp > ago({TimeRange:seconds}s)\n    | summarize v = countif(tobool(success) == false)\n    | project Metric = 'Failed Requests', Value = tostring(v)\n)\n| union (\n    requests\n    | where timestamp > ago({TimeRange:seconds}s)\n    | summarize v = round(avg(duration), 1)\n    | project Metric = 'Avg Duration (ms)', Value = tostring(v)\n)\n| union (\n    requests\n    | where timestamp > ago({TimeRange:seconds}s)\n    | summarize v = round(percentile(duration, 95), 1)\n    | project Metric = 'P95 Duration (ms)', Value = tostring(v)\n)",
+              "size": 4,
+              "title": "Request Summary",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "tiles",
+              "tileSettings": {
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "auto"
+                  }
+                },
+                "showBorder": true
+              }
+            },
+            "name": "overview-request-tiles"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let bin_ = {TimeRange:grain};\nrequests\n| where timestamp > ago({TimeRange:seconds}s)\n| summarize Requests = count(), Errors = countif(tobool(success) == false)\n    by bin(timestamp, bin_)\n| render timechart",
+              "size": 0,
+              "title": "Request Rate Over Time",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "timechart"
+            },
+            "customWidth": "50",
+            "name": "overview-request-rate",
+            "styleSettings": {
+              "maxWidth": "50"
+            }
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let bin_ = {TimeRange:grain};\nrequests\n| where timestamp > ago({TimeRange:seconds}s)\n| summarize P50 = percentile(duration, 50),\n            P90 = percentile(duration, 90),\n            P99 = percentile(duration, 99)\n    by bin(timestamp, bin_)\n| render timechart",
+              "size": 0,
+              "title": "Latency Percentiles Over Time",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "timechart"
+            },
+            "customWidth": "50",
+            "name": "overview-latency-percentiles",
+            "styleSettings": {
+              "maxWidth": "50"
+            }
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Overview"
+      },
+      "name": "group-overview"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": 0,
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## Tools\nMCP tool call distribution, latency and error rates."
+            },
+            "name": "tools-header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "dependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Calls = count()\n    by Tool = tostring(customDimensions['mcp.tool.name'])\n| order by Calls desc",
+              "size": 0,
+              "title": "Tool Call Distribution",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "barchart"
+            },
+            "customWidth": "50",
+            "name": "tools-call-distribution",
+            "styleSettings": {
+              "maxWidth": "50"
+            }
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "dependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Calls = count(),\n            ['Avg (ms)'] = round(avg(duration), 1),\n            ['P50 (ms)'] = round(percentile(duration, 50), 1),\n            ['P95 (ms)'] = round(percentile(duration, 95), 1),\n            Errors = countif(tobool(success) == false)\n    by Tool = tostring(customDimensions['mcp.tool.name'])\n| order by Calls desc",
+              "size": 0,
+              "title": "Tool Latency",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "table"
+            },
+            "customWidth": "50",
+            "name": "tools-latency-table",
+            "styleSettings": {
+              "maxWidth": "50"
+            }
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let bin_ = {TimeRange:grain};\ndependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Total = count(), Errors = countif(tobool(success) == false)\n    by bin(timestamp, bin_),\n       Tool = tostring(customDimensions['mcp.tool.name'])\n| extend ['Error %'] = round(100.0 * Errors / Total, 1)\n| project timestamp, Tool, ['Error %']\n| render timechart",
+              "size": 0,
+              "title": "Tool Error Rate Over Time",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "timechart"
+            },
+            "name": "tools-error-rate"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Tools"
+      },
+      "name": "group-tools"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": 0,
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## Data Volume\nRequest counts by tool and blob payload sizes."
+            },
+            "name": "data-volume-header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let bin_ = {TimeRange:grain};\ndependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where isnotempty(tostring(customDimensions['mcp.tool.name']))\n| summarize Calls = count()\n    by bin(timestamp, bin_),\n       Tool = tostring(customDimensions['mcp.tool.name'])\n| render timechart",
+              "size": 0,
+              "title": "Request Counts by Tool and Period",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "timechart"
+            },
+            "name": "data-volume-request-counts"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "dependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where tostring(customDimensions['mcp.tool.name']) startswith 'blob-'\n| extend PayloadBytes = tolong(tostring(customDimensions['blob.content_length']))\n| where PayloadBytes > 0\n| summarize ['Total MB'] = round(sum(PayloadBytes) / 1048576.0, 2),\n            ['Avg KB'] = round(avg(PayloadBytes) / 1024.0, 1),\n            ['Max KB'] = round(max(PayloadBytes) / 1024.0, 1),\n            Operations = count()\n    by Tool = tostring(customDimensions['mcp.tool.name'])\n| order by ['Total MB'] desc",
+              "size": 0,
+              "title": "Blob Payload Sizes",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "table"
+            },
+            "customWidth": "50",
+            "name": "data-volume-payload-sizes",
+            "styleSettings": {
+              "maxWidth": "50"
+            }
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "dependencies\n| where timestamp > ago({TimeRange:seconds}s)\n| where tostring(customDimensions['mcp.tool.name']) startswith 'blob-'\n| extend PayloadBytes = tolong(tostring(customDimensions['blob.content_length']))\n| where PayloadBytes > 0\n| summarize ['Total MB'] = round(sum(PayloadBytes) / 1048576.0, 2),\n            Operations = count()\n    by bin(timestamp, 1d)\n| render timechart",
+              "size": 0,
+              "title": "Daily Data Transfer",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "timechart"
+            },
+            "customWidth": "50",
+            "name": "data-volume-daily-transfer",
+            "styleSettings": {
+              "maxWidth": "50"
+            }
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "DataVolume"
+      },
+      "name": "group-data-volume"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": 0,
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## Logs\nLog severity distribution and recent warning/error log entries."
+            },
+            "name": "logs-header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "traces\n| where timestamp > ago({TimeRange:seconds}s)\n| extend Severity = case(\n    severityLevel == 1, 'INFO',\n    severityLevel == 2, 'WARN',\n    severityLevel == 3, 'ERROR',\n    severityLevel == 4, 'FATAL',\n    'DEBUG')\n| summarize Count = count() by Severity\n| render piechart",
+              "size": 0,
+              "title": "Log Severity Distribution",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "piechart"
+            },
+            "customWidth": "50",
+            "name": "logs-severity-distribution",
+            "styleSettings": {
+              "maxWidth": "50"
+            }
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "traces\n| where timestamp > ago({TimeRange:seconds}s)\n| where severityLevel >= 2\n| project timestamp,\n         Severity = case(\n             severityLevel == 1, 'INFO',\n             severityLevel == 2, 'WARN',\n             severityLevel == 3, 'ERROR',\n             severityLevel == 4, 'FATAL',\n             'OTHER'),\n         Message = message,\n         ['Trace ID'] = operation_Id,\n         Service = cloud_RoleName\n| order by timestamp desc\n| take 100",
+              "size": 0,
+              "title": "Recent Logs (WARN and above)",
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "visualization": "table",
+              "gridSettings": {
+                "sortBy": [
+                  {
+                    "itemKey": "timestamp",
+                    "sortOrder": 2
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "logs-recent",
+            "styleSettings": {
+              "maxWidth": "50"
+            }
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Logs"
+      },
+      "name": "group-logs"
+    }
+  ],
+  "fallbackResourceIds": [],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

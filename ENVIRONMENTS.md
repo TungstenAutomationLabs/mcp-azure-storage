@@ -7,6 +7,7 @@ This project uses the [Azure Developer CLI (`azd`)](https://learn.microsoft.com/
 ## Table of Contents
 
 - [How azd Environments Work](#how-azd-environments-work)
+- [Single .env File Deployment](#single-env-file-deployment)
 - [Quick Start: Create Dev and Test Environments](#quick-start-create-dev-and-test-environments)
 - [Switching Between Environments](#switching-between-environments)
 - [Deploy to a Specific Environment](#deploy-to-a-specific-environment)
@@ -38,6 +39,35 @@ Each `azd` environment is a named directory under `.azure/` containing an `.env`
 The active environment determines which `.env` file is read when you run `azd provision`, `azd deploy`, or `azd up`. All `azd env set` commands write to the **currently selected** environment.
 
 > **Key principle:** The same Bicep infrastructure code ([`infra/main.bicep`](infra/main.bicep)) and application code are deployed to every environment — only the **parameters** (subscription, region, secrets, storage account) differ.
+
+---
+
+## Single .env File Deployment
+
+Instead of running multiple `azd env set` commands, you can put **all** Azure deployment configuration in the project-root `.env` file. The [`deploy_to_azure.ps1`](deploy_to_azure.ps1) script reads these variables and syncs them to `azd` automatically before provisioning.
+
+Add the following to your `.env` (all are optional — omit any you have already configured via `azd env set`):
+
+```ini
+# Azure Deployment
+AZURE_ENV_NAME=mcp-storage-dev
+AZURE_SUBSCRIPTION_ID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+AZURE_LOCATION=uksouth
+AZURE_RESOURCE_GROUP=my-custom-rg     # optional override; default is rg-<AZURE_ENV_NAME>
+```
+
+**How it works:**
+
+| `.env` variable | What the script does |
+|---|---|
+| `AZURE_ENV_NAME` | Creates the azd environment if it does not exist, or selects it if it does. If omitted, the currently active azd environment is used. |
+| `AZURE_SUBSCRIPTION_ID` | Synced via `azd env set AZURE_SUBSCRIPTION_ID <value>` |
+| `AZURE_LOCATION` | Synced via `azd env set AZURE_LOCATION <value>` |
+| `AZURE_RESOURCE_GROUP` | Synced via `azd env set AZURE_RESOURCE_GROUP <value>`. Overrides the default `rg-<env-name>` naming. |
+
+Variables that are empty or absent in `.env` are left untouched in azd, so existing configuration is never overwritten unintentionally. This means the script is fully backwards-compatible — if none of these variables appear in `.env`, it behaves exactly as before.
+
+> **Tip:** See [`.env.example`](.env.example) for the full list of available variables.
 
 ---
 

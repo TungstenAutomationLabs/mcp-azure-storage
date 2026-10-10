@@ -22,6 +22,15 @@
     },
     "disabledTools": {
       "value": "${DISABLED_TOOLS=}"
+    },
+    "enableOtel": {
+      "value": "${ENABLE_OTEL=false}"
+    },
+    "otelCollectorImage": {
+      "value": "${OTEL_COLLECTOR_IMAGE=}"
+    },
+    "logRetentionDays": {
+      "value": "${LOG_RETENTION_DAYS=30}"
     }
   }
 }
