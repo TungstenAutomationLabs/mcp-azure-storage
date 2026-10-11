@@ -369,4 +369,58 @@ describe("DISABLED_TOOLS gating", () => {
       // working fine with unknown names (covered above).
     });
   });
+
+  describe("KNOWN_TOOL_NAMES static set (Finding 4)", () => {
+    it("contains all known tool names and no false positives for valid names", async () => {
+      // Import the static set from server.ts (avoids SDK internals)
+      const { KNOWN_TOOL_NAMES } = await import("../../src/server.js");
+
+      // Verify it contains a representative sample of known tool names
+      expect(KNOWN_TOOL_NAMES.has("blob-list")).toBe(true);
+      expect(KNOWN_TOOL_NAMES.has("blob-create")).toBe(true);
+      expect(KNOWN_TOOL_NAMES.has("blob-delete")).toBe(true);
+      expect(KNOWN_TOOL_NAMES.has("table-create")).toBe(true);
+      expect(KNOWN_TOOL_NAMES.has("queue-create")).toBe(true);
+      expect(KNOWN_TOOL_NAMES.has("fileshare-list-shares")).toBe(true);
+      expect(KNOWN_TOOL_NAMES.has("util-to-base64")).toBe(true);
+      expect(KNOWN_TOOL_NAMES.has("store-info")).toBe(true);
+
+      // Verify unknown names are NOT in the set (no false positives)
+      expect(KNOWN_TOOL_NAMES.has("totally-fake-tool")).toBe(false);
+      expect(KNOWN_TOOL_NAMES.has("nonexistent-tool")).toBe(false);
+    });
+
+    it("does not warn for valid tool names in DISABLED_TOOLS", async () => {
+      const { KNOWN_TOOL_NAMES } = await import("../../src/server.js");
+
+      // Simulate what validateDisabledToolNames does
+      const disabled = parseDisabledTools("blob-delete,queue-delete");
+      const unknowns: string[] = [];
+      for (const name of disabled) {
+        if (!KNOWN_TOOL_NAMES.has(name)) {
+          unknowns.push(name);
+        }
+      }
+
+      // Both blob-delete and queue-delete are valid -- no false warnings
+      expect(unknowns).toEqual([]);
+    });
+
+    it("correctly identifies unknown tool names in DISABLED_TOOLS", async () => {
+      const { KNOWN_TOOL_NAMES } = await import("../../src/server.js");
+
+      const disabled = parseDisabledTools("blob-delete,totally-fake-tool,another-fake");
+      const unknowns: string[] = [];
+      for (const name of disabled) {
+        if (!KNOWN_TOOL_NAMES.has(name)) {
+          unknowns.push(name);
+        }
+      }
+
+      // Only the fake names should be flagged
+      expect(unknowns).toContain("totally-fake-tool");
+      expect(unknowns).toContain("another-fake");
+      expect(unknowns).not.toContain("blob-delete");
+    });
+  });
 });

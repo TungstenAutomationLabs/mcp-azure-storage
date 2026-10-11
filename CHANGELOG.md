@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] -- 2026-10-11
+
+### Fixed
+
+- **Streaming upload false abort** (`src/server.ts`)
+  - Streaming uploads falsely aborted when the request body completes before the
+    Azure upload finishes. Changed guard from `req.close` to `req.complete` so
+    the PassThrough stream stays open until Azure confirms the upload.
+
+- **Server crash on client disconnect** (`src/server.ts`)
+  - Client disconnect during upload crashes the server process. Added missing
+    `error` listener on the PassThrough stream to catch and handle pipe errors
+    gracefully instead of propagating an uncaught exception.
+
+- **File-before-fields hang** (`src/server.ts`)
+  - File part sent before form fields (container, blobName) hangs the request
+    indefinitely because the upload starts without a valid blob client. Now
+    returns HTTP 400 with `code: "invalid_field_order"` immediately.
+
+- **DISABLED_TOOLS false warnings** (`src/utils/disabled-tools.ts`, `src/tools/utility-tools.ts`)
+  - `DISABLED_TOOLS` validation warns on every valid tool name because SDK
+    introspection returned an empty tool set at startup. Replaced SDK
+    introspection with a static tool name registry for reliable validation.
+
 ## [1.2.1] -- 2026-10-11
 
 ### Fixed

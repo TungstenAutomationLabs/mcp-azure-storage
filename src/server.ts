@@ -326,42 +326,72 @@ function createMcpServer(): McpServer {
 }
 
 // ── Startup validation: warn on unknown disabled tool names ──────────────────
-// Runs once after the first createMcpServer() call to discover the full set of
-// registered tool names, then compares against DISABLED_TOOLS. Unknown names
-// are logged as warnings but do not prevent server startup.
+// Uses a static list of all registered tool names (maintained alongside tool
+// registration modules) instead of probing SDK internals which may change
+// between versions. Unknown names are logged as warnings but do not prevent
+// server startup.
 let _disabledToolsValidated = false;
+
+/** Canonical set of all tool names registered by the tool modules. */
+export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
+  // blob-tools.ts (13 tools)
+  "blob-container-create",
+  "blob-container-delete",
+  "blob-container-exists",
+  "blob-list",
+  "blob-create",
+  "blob-head",
+  "blob-read",
+  "blob-delete",
+  "blob-set-metadata",
+  "blob-set-tier",
+  "blob-get-sas-url",
+  "blob-get-container-sas",
+  "blob-upload-from-url",
+  // fileshare-tools.ts (8 tools)
+  "fileshare-list-shares",
+  "fileshare-create-share",
+  "fileshare-delete-share",
+  "fileshare-create-directory",
+  "fileshare-delete-directory",
+  "fileshare-upload-file",
+  "fileshare-read-file",
+  "fileshare-delete-file",
+  // queue-tools.ts (8 tools)
+  "queue-create",
+  "queue-delete",
+  "queue-send-message",
+  "queue-peek-messages",
+  "queue-receive-messages",
+  "queue-delete-message",
+  "queue-update-message",
+  "queue-renew-lease",
+  // table-tools.ts (5 tools)
+  "table-create",
+  "table-delete",
+  "table-entity-upsert",
+  "table-entity-query",
+  "table-entity-delete",
+  // utility-tools.ts (8 tools)
+  "util-to-base64",
+  "util-from-base64",
+  "util-refresh-blob-sas",
+  "util-refresh-container-sas",
+  "util-get-content-type",
+  "util-to-container-name",
+  "util-get-upload-url",
+  "store-info",
+]);
 
 function validateDisabledToolNames(): void {
   if (_disabledToolsValidated || disabledToolNames.size === 0) return;
   _disabledToolsValidated = true;
 
-  // Create a temporary server with NO disabled gating to discover all known tools.
-  const tempServer = new McpServer({ name: "tool-discovery", version: "0.0.0" });
-  wrapToolErrorHandler(tempServer);
-  registerBlobTools(tempServer);
-  registerTableTools(tempServer);
-  registerQueueTools(tempServer);
-  registerFileShareTools(tempServer);
-  registerUtilityTools(tempServer);
-
-  // Extract registered tool names from the internal _registeredTools map.
-  // The MCP SDK stores tools in a Map<string, RegisteredTool>.
-  const knownTools = new Set<string>();
-  const registeredToolsMap = (tempServer as any)._registeredTools;
-  if (registeredToolsMap instanceof Map) {
-    for (const name of registeredToolsMap.keys()) {
-      knownTools.add((name as string).toLowerCase());
-    }
-  }
-
   for (const disabled of disabledToolNames) {
-    if (!knownTools.has(disabled)) {
+    if (!KNOWN_TOOL_NAMES.has(disabled)) {
       warn(`DISABLED_TOOLS contains unknown tool name: '${disabled}'`, { tool: disabled });
     }
   }
-
-  // Clean up temp server
-  try { tempServer.close(); } catch { /* ignore */ }
 }
 
 // ── Session management for stateful mode ─────────────────────────────────────
@@ -833,8 +863,33 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
     fileName = info.filename;
     mimeType = info.mimeType || "application/octet-stream";
 
+    // Guard: containerName must be available before the file part arrives.
+    // If the file part is sent before the required fields, the upload promise
+    // would return early without consuming filePassThrough, causing busboy to
+    // stall on back-pressure and the request to hang forever.
+    if (!fields.containerName) {
+      // Drain the incoming file stream to prevent back-pressure hang
+      stream.resume();
+      if (!res.headersSent) {
+        responded = true;
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: "invalid_field_order",
+          message: "containerName and blobName fields must appear before the file part in the multipart form",
+        }));
+      }
+      return;
+    }
+
     // Metered PassThrough — counts bytes and enforces limit
     filePassThrough = new PassThrough();
+    // Attach an error handler to prevent unhandled 'error' events from
+    // crashing the process when destroy(err) is called (e.g. client abort,
+    // too_large, missing_field). The actual error is handled by the upload
+    // promise's catch block.
+    filePassThrough.on("error", (err) => {
+      debug(`Upload stream error: ${err.message}`);
+    });
 
     stream.on("data", (chunk: Buffer) => {
       bytesReceived += chunk.length;
@@ -1050,8 +1105,12 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
   });
 
   // ── Client abort — destroy busboy to stop processing ──
+  // Since Node.js 16, `close` fires when the request body has been fully
+  // received (normal completion) as well as on genuine disconnect. We must
+  // check `req.complete` to distinguish the two: `true` means the body was
+  // fully consumed (normal), `false` means the client disconnected early.
   req.on("close", () => {
-    if (!res.writableFinished) {
+    if (!req.complete && !res.writableFinished) {
       // Client disconnected before upload completed
       filePassThrough?.destroy(new Error("client_aborted"));
     }

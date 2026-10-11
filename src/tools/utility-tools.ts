@@ -287,11 +287,12 @@ export function registerUtilityTools(server: McpServer): void {
           authentication: "X-API-Key header (same key as MCP requests)",
           maxFileSize: "100 MB",
           fields: {
-            file: "(required) The file to upload — multipart form field",
-            containerName: "(required) Target blob container name",
-            blobName: "(optional) Blob name with path — defaults to the uploaded filename",
+            file: "(required) The file to upload -- multipart form field. MUST appear AFTER containerName and blobName in the form.",
+            containerName: "(required) Target blob container name. MUST appear BEFORE the file field.",
+            blobName: "(optional) Blob name with path -- defaults to the uploaded filename. MUST appear BEFORE the file field.",
             metadata: '(optional) JSON string of key-value metadata, e.g. {"author":"Alice"}',
           },
+          fieldOrder: "IMPORTANT: containerName and blobName fields MUST be sent BEFORE the file part in the multipart form. If the file part arrives first, the server returns 400 invalid_field_order.",
           examples: {
             curl: `curl -X POST ${baseUrl}/upload -H "X-API-Key: <key>" -F "file=@./report.pdf" -F "containerName=documents" -F "blobName=reports/report.pdf"`,
             python: `requests.post("${baseUrl}/upload", headers={"X-API-Key": "<key>"}, files={"file": open("report.pdf", "rb")}, data={"containerName": "documents", "blobName": "reports/report.pdf"})`,

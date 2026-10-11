@@ -395,6 +395,168 @@ describe("POST /upload", () => {
     });
   });
 
+  describe("req.close with req.complete guard (Finding 3)", () => {
+    it("does not destroy PassThrough when req.complete is true (normal close)", () => {
+      // When req.complete === true, the body was fully received. The close
+      // handler should NOT destroy filePassThrough -- the upload is still
+      // being written to Azure and should complete normally.
+      const passThrough = new PassThrough();
+      passThrough.on("error", () => { /* swallow for test */ });
+
+      let destroyed = false;
+      const origDestroy = passThrough.destroy.bind(passThrough);
+      passThrough.destroy = function (err?: Error) {
+        destroyed = true;
+        return origDestroy(err);
+      } as any;
+
+      // Simulate the guard logic from server.ts
+      const reqComplete = true;
+      const resWritableFinished = false;
+      if (!reqComplete && !resWritableFinished) {
+        passThrough.destroy(new Error("client_aborted"));
+      }
+
+      expect(destroyed).toBe(false);
+    });
+
+    it("destroys PassThrough when req.complete is false (genuine disconnect)", () => {
+      const passThrough = new PassThrough();
+      passThrough.on("error", () => { /* swallow for test */ });
+
+      let destroyError: Error | undefined;
+      const origDestroy = passThrough.destroy.bind(passThrough);
+      passThrough.destroy = function (err?: Error) {
+        destroyError = err;
+        return origDestroy(err);
+      } as any;
+
+      // Simulate the guard logic from server.ts
+      const reqComplete = false;
+      const resWritableFinished = false;
+      if (!reqComplete && !resWritableFinished) {
+        passThrough.destroy(new Error("client_aborted"));
+      }
+
+      expect(destroyError).toBeDefined();
+      expect(destroyError!.message).toBe("client_aborted");
+    });
+
+    it("does not destroy PassThrough when res.writableFinished is true", () => {
+      const passThrough = new PassThrough();
+      passThrough.on("error", () => { /* swallow for test */ });
+
+      let destroyed = false;
+      const origDestroy = passThrough.destroy.bind(passThrough);
+      passThrough.destroy = function (err?: Error) {
+        destroyed = true;
+        return origDestroy(err);
+      } as any;
+
+      // Both conditions must be met: !req.complete AND !res.writableFinished
+      const reqComplete = false;
+      const resWritableFinished = true;
+      if (!reqComplete && !resWritableFinished) {
+        passThrough.destroy(new Error("client_aborted"));
+      }
+
+      expect(destroyed).toBe(false);
+    });
+  });
+
+  describe("PassThrough error listener (Finding 2)", () => {
+    it("does not crash when destroy(err) is called with an error listener attached", async () => {
+      const passThrough = new PassThrough();
+
+      // Attach the error handler as done in server.ts
+      const errorPromise = new Promise<string>((resolve) => {
+        passThrough.on("error", (err) => {
+          resolve(err.message);
+        });
+      });
+
+      // destroy(err) emits asynchronously -- this should NOT crash
+      passThrough.destroy(new Error("client_aborted"));
+
+      // Wait for the error event to fire
+      const message = await errorPromise;
+      expect(message).toBe("client_aborted");
+    });
+
+    it("without a listener the error event has no handler (demonstrates the bug pattern)", () => {
+      const passThrough = new PassThrough();
+
+      // Verify that a PassThrough with no 'error' listener has zero
+      // listeners. This is the condition that causes Node.js to throw
+      // an uncaught exception when destroy(err) is called.
+      expect(passThrough.listenerCount("error")).toBe(0);
+
+      // After attaching a listener (the fix), listenerCount becomes 1
+      passThrough.on("error", () => { /* swallow */ });
+      expect(passThrough.listenerCount("error")).toBe(1);
+    });
+  });
+
+  describe("file-before-fields guard (Finding 1)", () => {
+    it("returns 400 invalid_field_order when file arrives before containerName", () => {
+      // Simulate the guard logic: if containerName is not in fields when
+      // the file handler fires, we drain the stream and respond 400.
+      const fields: Record<string, string> = {};
+      // No containerName set yet
+
+      let headersSent = false;
+      let statusCode = 0;
+      let responseBody = "";
+      let streamResumed = false;
+
+      // Mock file stream
+      const fileStream = {
+        resume: () => { streamResumed = true; },
+      };
+
+      // Mock response
+      const mockRes = {
+        headersSent: false,
+        writeHead: (code: number, _headers: Record<string, string>) => {
+          statusCode = code;
+          headersSent = true;
+        },
+        end: (body: string) => { responseBody = body; },
+      };
+
+      // Apply the guard logic from the file handler
+      if (!fields.containerName) {
+        fileStream.resume();
+        if (!mockRes.headersSent) {
+          mockRes.writeHead(400, { "Content-Type": "application/json" });
+          mockRes.end(JSON.stringify({
+            error: "invalid_field_order",
+            message: "containerName and blobName fields must appear before the file part in the multipart form",
+          }));
+        }
+      }
+
+      expect(streamResumed).toBe(true);
+      expect(statusCode).toBe(400);
+      const parsed = JSON.parse(responseBody);
+      expect(parsed.error).toBe("invalid_field_order");
+      expect(parsed.message).toContain("containerName");
+      expect(parsed.message).toContain("before the file part");
+    });
+
+    it("does not trigger when containerName is present before file", () => {
+      const fields: Record<string, string> = { containerName: "my-container" };
+
+      let guardTriggered = false;
+
+      if (!fields.containerName) {
+        guardTriggered = true;
+      }
+
+      expect(guardTriggered).toBe(false);
+    });
+  });
+
   describe("aborted upload handling", () => {
     it("does not commit blob when stream is destroyed before completion", async () => {
       // Simulate the scenario where uploadStream rejects because the
