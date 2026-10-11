@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] -- 2026-10-11
+
+### Fixed
+
+- **Deploy script** (`deploy_to_azure.ps1`)
+  - PowerShell 5.1 `ConvertFrom-Json` array enumeration bug -- wrap pipeline output
+    with `@()` to guarantee array semantics regardless of PS version
+  - ACR login-server detection false-positive -- use exact-match parsing instead of
+    substring match that could collide with similarly-named registries
+  - ACR build ordering -- defer OTel Collector image build until after the main
+    application image, preventing race conditions during first-time deployments
+
+- **Bicep template** (`infra/main.bicep`)
+  - Chicken-and-egg OTel sidecar -- make the OTel Collector sidecar container
+    conditional so the Container App can deploy successfully before the collector
+    image exists in ACR
+
 ## [1.2.0] -- 2026-10-09
 
 ### Added

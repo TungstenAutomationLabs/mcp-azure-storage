@@ -674,7 +674,13 @@ var otelCollectorContainer = {
 }
 
 // Conditional containers array -- includes the sidecar only when OTel is enabled
-var containers = enableOtel ? [mcpContainer, otelCollectorContainer] : [mcpContainer]
+// AND a collector image has been provided. On first-time deploys the ACR does not
+// exist yet during `azd provision`, so otelCollectorImage is empty. Including a
+// container with an empty image causes Azure to reject the deployment with
+// ContainerAppImageRequired. The deploy script runs a second `azd provision`
+// after building and pushing the collector image, which populates the parameter.
+var includeOtelSidecar = enableOtel && !empty(otelCollectorImage)
+var containers = includeOtelSidecar ? [mcpContainer, otelCollectorContainer] : [mcpContainer]
 
 // -- Secrets array (conditional App Insights connection string) -----------------
 var baseSecrets = [
