@@ -20,7 +20,7 @@
 param appInsightsName string
 
 @description('Display name shown in the workbook gallery.')
-param workbookDisplayName string = 'MCP Azure Storage -- Observability'
+param workbookDisplayName string = 'MCP Azure Storage Monitoring'
 
 @description('Region for the workbook resource. Defaults to the resource group location.')
 param location string = resourceGroup().location
@@ -42,8 +42,9 @@ var workbookWithScope = {
 }
 
 resource workbook 'Microsoft.Insights/workbooks@2022-04-01' = {
-  // Deterministic, so this is an update-in-place on re-deploy.
-  name: guid(resourceGroup().id, 'mcp-storage-observability')
+  // Deterministic GUID -- must match the seed in infra/main.bicep so both
+  // deployment paths (script vs azd) update the same workbook resource.
+  name: guid(resourceGroup().id, 'mcp-storage-monitoring')
   location: location
   kind: 'shared'
   properties: {

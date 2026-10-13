@@ -363,7 +363,8 @@ Write-Step "Syncing .env application variables to azd environment '$envName'"
 $syncKeys = @(
     "AZURE_STORAGE_ACCOUNT_NAME",
     "AZURE_STORAGE_ACCOUNT_KEY",
-    "MCP_API_KEY"
+    "MCP_API_KEY",
+    "DISABLED_TOOLS"
 )
 
 # Resolve the azd env file path so we can clear stale values directly.

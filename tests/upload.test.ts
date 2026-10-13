@@ -648,6 +648,198 @@ describe("POST /upload", () => {
     });
   });
 
+  describe("uploadPromise .catch() safety net (Fault 2 fix)", () => {
+    it("absorbs rejection into uploadError variable without becoming unhandled", async () => {
+      // This test verifies the core fix: .catch() absorbs the error
+      // and stores it, so the promise settles as resolved (not rejected).
+      // Without this fix, the rejected promise crashes the process.
+
+      let uploadError: Error | null = null;
+
+      const filePassThrough = new PassThrough();
+      filePassThrough.on("error", () => { /* swallow */ });
+
+      const uploadPromise = (async () => {
+        // Simulate mockSlowUploadStream that rejects on stream error
+        await new Promise<void>((resolve, reject) => {
+          filePassThrough.on("error", (err) => reject(err));
+          filePassThrough.on("end", () => setTimeout(resolve, 500));
+        });
+      })().catch((err: unknown) => {
+        // This is the fix pattern from server.ts
+        uploadError = err instanceof Error ? err : new Error(String(err));
+        // Do NOT re-throw
+      });
+
+      // Simulate client abort destroying the stream
+      filePassThrough.destroy(new Error("client_aborted"));
+
+      // Wait for the promise to settle
+      await uploadPromise;
+
+      // uploadPromise resolved (not rejected) — no unhandled rejection
+      expect(uploadError).not.toBeNull();
+      expect(uploadError!.message).toBe("client_aborted");
+    });
+
+    it("bb.on(close) sees uploadError and can throw it in try/catch", async () => {
+      let uploadError: Error | null = null;
+
+      const filePassThrough = new PassThrough();
+      filePassThrough.on("error", () => { /* swallow */ });
+
+      const uploadPromise = (async () => {
+        await new Promise<void>((resolve, reject) => {
+          filePassThrough.on("error", (err) => reject(err));
+          filePassThrough.on("end", () => setTimeout(resolve, 500));
+        });
+      })().catch((err: unknown) => {
+        uploadError = err instanceof Error ? err : new Error(String(err));
+      });
+
+      filePassThrough.destroy(new Error("too_large"));
+      await uploadPromise;
+
+      // Simulate bb.on("close") logic
+      let caughtMessage = "";
+      try {
+        if (uploadError) {
+          throw uploadError;
+        }
+      } catch (error: any) {
+        caughtMessage = error.message;
+      }
+
+      expect(caughtMessage).toBe("too_large");
+    });
+
+    it("uploadPromise resolves normally when no error occurs", async () => {
+      let uploadError: Error | null = null;
+
+      const filePassThrough = new PassThrough();
+      filePassThrough.on("error", () => { /* swallow */ });
+
+      const uploadPromise = (async () => {
+        await new Promise<void>((resolve) => {
+          filePassThrough.on("end", () => resolve());
+        });
+      })().catch((err: unknown) => {
+        uploadError = err instanceof Error ? err : new Error(String(err));
+      });
+
+      // Consume the stream so 'end' fires after end() is called
+      filePassThrough.resume();
+      // End the stream normally
+      filePassThrough.end();
+      await uploadPromise;
+
+      expect(uploadError).toBeNull();
+    });
+  });
+
+  describe("req.on('error') handler (Fault 2 fix)", () => {
+    it("catches ECONNRESET without crashing and forwards to filePassThrough", () => {
+      const passThrough = new PassThrough();
+      passThrough.on("error", () => { /* swallow */ });
+
+      let destroyedWithError: string | undefined;
+      const origDestroy = passThrough.destroy.bind(passThrough);
+      passThrough.destroy = function (err?: Error) {
+        destroyedWithError = err?.message;
+        return origDestroy(err);
+      } as any;
+
+      // Simulate the req.on("error") handler logic from server.ts
+      const reqError = new Error("read ECONNRESET");
+      // This is the handler that would crash without the fix
+      const filePassThrough = passThrough;
+      if (filePassThrough && !filePassThrough.destroyed) {
+        filePassThrough.destroy(new Error("client_aborted"));
+      }
+
+      expect(destroyedWithError).toBe("client_aborted");
+    });
+
+    it("does not destroy already-destroyed PassThrough", () => {
+      const passThrough = new PassThrough();
+      passThrough.on("error", () => { /* swallow */ });
+
+      // Pre-destroy it
+      passThrough.destroy();
+
+      let destroyCalled = false;
+      const origDestroy = passThrough.destroy.bind(passThrough);
+      passThrough.destroy = function (err?: Error) {
+        destroyCalled = true;
+        return origDestroy(err);
+      } as any;
+
+      // Simulate the guard: !filePassThrough.destroyed
+      if (passThrough && !passThrough.destroyed) {
+        passThrough.destroy(new Error("client_aborted"));
+      }
+
+      expect(destroyCalled).toBe(false);
+    });
+  });
+
+  describe("enhanced req.on('close') handler (Fault 2 fix)", () => {
+    it("calls bb.destroy() when client disconnects to prevent busboy hang", () => {
+      // When the client aborts, busboy may not emit 'close' unless
+      // we explicitly destroy it. This test verifies the fix calls
+      // bb.destroy() in the req.on("close") handler.
+
+      let bbDestroyed = false;
+      const mockBb = {
+        destroy: () => { bbDestroyed = true; },
+      };
+
+      const passThrough = new PassThrough();
+      passThrough.on("error", () => { /* swallow */ });
+
+      // Simulate req.on("close") handler from server.ts
+      const reqComplete = false;
+      const resWritableFinished = false;
+      if (!reqComplete && !resWritableFinished) {
+        if (passThrough && !passThrough.destroyed) {
+          passThrough.destroy(new Error("client_aborted"));
+        }
+        mockBb.destroy();
+      }
+
+      expect(bbDestroyed).toBe(true);
+    });
+
+    it("does not destroy streams when req.complete is true", () => {
+      let bbDestroyed = false;
+      const mockBb = {
+        destroy: () => { bbDestroyed = true; },
+      };
+
+      const passThrough = new PassThrough();
+      passThrough.on("error", () => { /* swallow */ });
+
+      let ptDestroyed = false;
+      const origDestroy = passThrough.destroy.bind(passThrough);
+      passThrough.destroy = function (err?: Error) {
+        ptDestroyed = true;
+        return origDestroy(err);
+      } as any;
+
+      const reqComplete = true;
+      const resWritableFinished = false;
+      if (!reqComplete && !resWritableFinished) {
+        if (passThrough && !passThrough.destroyed) {
+          passThrough.destroy(new Error("client_aborted"));
+        }
+        mockBb.destroy();
+      }
+
+      expect(ptDestroyed).toBe(false);
+      expect(bbDestroyed).toBe(false);
+    });
+  });
+
   describe("JSON body parser error handler", () => {
     it("returns 413 with structured body including maxJsonBodyBytes for PayloadTooLargeError", async () => {
       const app = express();

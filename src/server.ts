@@ -833,6 +833,7 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
   let responded = false;    // guard against double-response
   let uploadPromise: Promise<void> | null = null;
   let filePassThrough: PassThrough | null = null;
+  let uploadError: Error | null = null; // captured upload rejection (see .catch below)
 
   // ── Constants for Azure upload ──
   const UPLOAD_BUFFER_SIZE = 4 * 1024 * 1024; // 4 MiB per block
@@ -910,33 +911,32 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
       }
     });
 
+    // Handle errors on the busboy file sub-stream. When the request is
+    // destroyed mid-upload, pipe() does NOT propagate errors from source
+    // to destination, so we must catch them here and forward to the
+    // PassThrough to abort the Azure upload.
+    stream.on("error", (err: Error) => {
+      debug(`Busboy file stream error: ${err.message}`);
+      if (filePassThrough && !filePassThrough.destroyed) {
+        filePassThrough.destroy(err);
+      }
+    });
+
     stream.pipe(filePassThrough);
 
-    // Start the Azure upload immediately — uploadStream reads from the
-    // PassThrough as data arrives. The commit happens only when the stream
-    // ends successfully (all blocks uploaded + commitBlockList).
+    //
+    // CRITICAL: Attach .catch() immediately to prevent an unhandled
+    // rejection if the upload rejects and bb.on("close") never fires
+    // (which happens when the client aborts and req is destroyed —
+    // busboy does not guarantee a "close" event on upstream abort).
+    // The actual error is handled either by the bb.on("close") try/catch
+    // (when close does fire) or by the req.on("close") cleanup below
+    // (when the client disconnects). The .catch() here is purely a
+    // safety net to ensure the rejection is always observed.
     uploadPromise = (async () => {
       const containerName = fields.containerName;
       const blobName = fields.blobName || fileName;
 
-      // We start the upload even before we've validated fields, because
-      // fields may arrive after the file in the multipart stream. The
-      // actual Azure call needs containerName/blobName, so if they haven't
-      // arrived yet we defer validation to the "close" handler. However,
-      // uploadStream needs a real client, so we start it here only if we
-      // have enough info. If containerName isn't available yet, we buffer
-      // into the PassThrough until close, then validate + upload.
-      //
-      // For simplicity and reliability: we always pipe to the PassThrough,
-      // and start the Azure upload in the close handler after all fields
-      // are known. However, this means the PassThrough buffers data until
-      // close is called for field validation — but uploadStream consumes
-      // the PassThrough concurrently (it reads in 4 MiB chunks), so memory
-      // stays bounded as long as we start the upload early.
-      //
-      // Revised approach: start upload here if containerName is already
-      // available (most clients send fields before file), otherwise the
-      // close handler will do it.
       if (!containerName) {
         // Fields haven't arrived yet — upload will be started in close handler
         return;
@@ -954,7 +954,26 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
           blobHTTPHeaders: { blobContentType: mimeType },
         }
       );
-    })();
+    })().catch((err: unknown) => {
+      // CRITICAL: Absorb the rejection so it NEVER becomes an unhandled
+      // rejection. When the client aborts mid-upload, req is destroyed,
+      // which destroys filePassThrough, which causes uploadStream to
+      // reject. However, busboy does NOT guarantee a "close" event when
+      // its source stream is destroyed, so bb.on("close") may never
+      // fire to await this promise. Without this .catch(), the rejected
+      // promise has no observer -> Node.js exits with unhandled rejection.
+      //
+      // We store the error in uploadError so bb.on("close") (if it fires)
+      // can inspect it and respond to the client appropriately.
+      uploadError = err instanceof Error ? err : new Error(String(err));
+      const msg = uploadError.message;
+      if (msg !== "client_aborted" && msg !== "too_large" && msg !== "missing_field") {
+        logError("Upload stream error (caught safety net)", { error: msg });
+      } else {
+        debug(`Upload stream terminated: ${msg}`);
+      }
+      // Do NOT re-throw — the promise must resolve so it is never unhandled.
+    });
   });
 
   // ── Close handler — all parts received; validate and respond ──
@@ -1017,6 +1036,10 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
       // just wait for it to complete. Otherwise, start it now.
       if (uploadPromise) {
         await uploadPromise;
+        // Check if the upload was aborted (error absorbed by .catch above)
+        if (uploadError) {
+          throw uploadError;
+        }
         // If the upload promise resolved without actually calling uploadStream
         // (because containerName wasn't available), we need to do it now
         if (!fields.containerName) {
@@ -1066,6 +1089,12 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
       responded = true;
       const message = error instanceof Error ? error.message : "Upload failed";
 
+      // Check if client aborted — no point responding to a dead connection
+      if (message === "client_aborted") {
+        debug("Upload aborted by client (bb.close path)");
+        return;
+      }
+
       // Check if this was a limit error from our metered stream
       if (message === "too_large") {
         if (!res.headersSent) {
@@ -1104,7 +1133,18 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
     }
   });
 
-  // ── Client abort — destroy busboy to stop processing ──
+  // ── Request error handler ──
+  // When the underlying TCP socket errors (ECONNRESET, EPIPE during client
+  // abort), Node.js emits an 'error' event on req. Without a listener,
+  // this becomes an uncaught exception that crashes the process.
+  req.on("error", (err: Error) => {
+    debug(`Upload request stream error: ${err.message}`);
+    if (filePassThrough && !filePassThrough.destroyed) {
+      filePassThrough.destroy(new Error("client_aborted"));
+    }
+  });
+
+  // ── Client abort — destroy streams to stop processing ──
   // Since Node.js 16, `close` fires when the request body has been fully
   // received (normal completion) as well as on genuine disconnect. We must
   // check `req.complete` to distinguish the two: `true` means the body was
@@ -1112,7 +1152,13 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
   req.on("close", () => {
     if (!req.complete && !res.writableFinished) {
       // Client disconnected before upload completed
-      filePassThrough?.destroy(new Error("client_aborted"));
+      debug("Client disconnected mid-upload, destroying streams");
+      if (filePassThrough && !filePassThrough.destroyed) {
+        filePassThrough.destroy(new Error("client_aborted"));
+      }
+      // Destroy busboy to prevent it from hanging on partial data.
+      // This is a no-op if busboy already finished.
+      bb.destroy();
     }
   });
 
@@ -1176,3 +1222,27 @@ function shutdown(signal: string) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+// ── Process-level safety nets ────────────────────────────────────────────────
+// These handlers catch any error that slips through all other defences.
+// They log the error and let the process continue so that parallel requests,
+// MCP sessions, and health checks remain unaffected.
+// In production (Container Apps), a crash here would restart the container,
+// killing all active sessions and causing 502/503 for several seconds.
+process.on("uncaughtException", (err: Error) => {
+  logError("Uncaught exception (process safety net)", {
+    error: err.message,
+    ...(err.stack ? { stack: err.stack } : {}),
+  });
+  // Do NOT call process.exit() — keep serving
+});
+
+process.on("unhandledRejection", (reason: unknown) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const stack = reason instanceof Error ? reason.stack : undefined;
+  logError("Unhandled rejection (process safety net)", {
+    error: msg,
+    ...(stack ? { stack } : {}),
+  });
+  // Do NOT call process.exit() — keep serving
+});

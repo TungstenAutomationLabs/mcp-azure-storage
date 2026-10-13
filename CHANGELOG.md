@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Client disconnect during upload crashes the server process. Added missing
     `error` listener on the PassThrough stream to catch and handle pipe errors
     gracefully instead of propagating an uncaught exception.
+  - Deep fix: added `.catch()` on the `uploadPromise` so rejected Azure SDK
+    promises cannot surface as unhandled rejections. Added process-level
+    `uncaughtException` and `unhandledRejection` safety nets that log and
+    exit cleanly instead of crashing silently.
 
 - **File-before-fields hang** (`src/server.ts`)
   - File part sent before form fields (container, blobName) hangs the request
@@ -41,6 +45,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `DISABLED_TOOLS` validation warns on every valid tool name because SDK
     introspection returned an empty tool set at startup. Replaced SDK
     introspection with a static tool name registry for reliable validation.
+
+- **DISABLED_TOOLS pipeline fix** (`deploy_to_azure.ps1`)
+  - `DISABLED_TOOLS` env var was not included in the `$syncKeys` array, so
+    changes to the disabled-tools list were silently dropped during
+    re-deployment. Added `DISABLED_TOOLS` to `$syncKeys` to ensure it is
+    synced to the Container App environment.
+
+- **Monitoring connection string leak** (`scripts/setup-monitoring.ps1`, `infra/main.bicep`)
+  - `setup-monitoring.ps1` printed the full Application Insights connection
+    string (which contains an ingestion key) to the console. Now redacted
+    with a message directing users to the Azure Portal or Key Vault.
+  - Removed the `appInsightsConnectionString` Bicep deployment output from
+    `infra/main.bicep`. The connection string is passed to the Container App
+    as a secret env var only.
+
+- **Workbook name and GUID alignment** (`otel/workbook.bicep`, `infra/main.bicep`)
+  - The workbook display name and deterministic GUID seed differed between
+    `otel/workbook.bicep` (script path) and `infra/main.bicep` (azd path),
+    causing duplicate workbook resources on re-deployment. Both now use the
+    same display name (`MCP Azure Storage Monitoring`) and GUID seed
+    (`resourceGroup().id, 'mcp-storage-monitoring'`).
+
+- **OTel requirement warning** (`scripts/setup-monitoring.ps1`)
+  - Added a post-deploy warning that the workbook requires OTel to be enabled
+    (`-EnableOTel` flag on `deploy_to_azure.ps1`) for telemetry data to appear.
+
+### Changed
+
+- **Upload field ordering documentation** (`src/tools/utility-tools.ts`)
+  - `util-get-upload-url` tool response now documents the required field
+    ordering: `containerName` and `blobName` must appear before the `file`
+    part in the multipart form. Includes `fieldOrder` warning and updated
+    field descriptions.
+
+- **Monitoring documentation** (`ENVIRONMENTS.md`)
+  - Added "Monitoring and Telemetry" section covering OTel enablement,
+    connection string security, and the requirement for the OTel Collector
+    sidecar to populate workbook dashboards.
 
 ## [1.2.0] -- 2026-10-09
 

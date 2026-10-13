@@ -800,5 +800,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerRegistry.properties.loginServer
 output mcpEndpoint string = 'https://${containerApp.properties.configuration.ingress.fqdn}/mcp'
 output storageAccountName string = resolvedStorageAccountName
-output appInsightsConnectionString string = enableOtel ? appInsights.properties.ConnectionString : ''
+// NOTE: The App Insights connection string is intentionally NOT exposed as a
+// deployment output because it contains an ingestion key (credential). It is
+// passed to the Container App as a secret env var above. To retrieve it
+// manually, use: az monitor app-insights component show --app <name> -g <rg>
 output appInsightsName string = enableOtel ? appInsights.name : ''

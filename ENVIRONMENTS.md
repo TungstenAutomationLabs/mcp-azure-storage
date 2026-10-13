@@ -19,6 +19,7 @@ This project uses the [Azure Developer CLI (`azd`)](https://learn.microsoft.com/
 - [Tearing Down an Environment](#tearing-down-an-environment)
 - [CI/CD with Multiple Environments](#cicd-with-multiple-environments)
 - [Directory Structure](#directory-structure)
+- [Monitoring and Telemetry](#monitoring-and-telemetry)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -394,6 +395,49 @@ For CI/CD, you typically **don't** check in `.azure/` directories. Instead, set 
 - **GitHub Secrets** — for sensitive values (`MCP_API_KEY`, `AZURE_STORAGE_ACCOUNT_KEY`)
 - **GitHub Variables** — for non-sensitive values (`AZURE_LOCATION`)
 - **`azd env set`** in the workflow — to configure the environment before deploy
+
+---
+
+## Monitoring and Telemetry
+
+### OpenTelemetry (OTel) Requirement
+
+> **Important:** The Azure Monitor workbooks and alert rules deployed by `setup-monitoring.ps1` (or via `infra/main.bicep` with `enableOtel=true`) **require OpenTelemetry to be enabled** for data to appear. Without the OTel Collector sidecar, there is no telemetry pipeline and the workbook dashboards will be empty.
+
+To enable OTel when deploying:
+
+```powershell
+# Via the deploy script
+.\deploy_to_azure.ps1 -EnableOTel
+
+# Or via azd directly
+azd env set ENABLE_OTEL true
+azd up
+```
+
+When OTel is **not** enabled:
+- `OTEL_EXPORTER_OTLP_ENDPOINT` is empty, so the Node.js instrumentation exits immediately (zero overhead).
+- No OTel Collector sidecar is deployed alongside the MCP server.
+- The workbook resource exists but displays no data.
+- Alert rules exist but never fire (no telemetry to evaluate).
+
+This is by design -- OTel adds a sidecar container that consumes resources. Enable it only when you need observability.
+
+### Connection String Security
+
+The Application Insights connection string contains an ingestion key and is treated as a credential. It is:
+- **Not** printed to the console by `setup-monitoring.ps1` (redacted).
+- **Not** exposed as a Bicep deployment output (removed from `infra/main.bicep` outputs).
+- Passed to the Container App as a **secret** environment variable via `allSecrets`.
+
+To retrieve the connection string when needed:
+
+```bash
+az monitor app-insights component show \
+  --app <app-insights-name> \
+  --resource-group <resource-group> \
+  --query connectionString -o tsv
+```
 
 ---
 

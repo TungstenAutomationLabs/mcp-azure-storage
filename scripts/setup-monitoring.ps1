@@ -217,15 +217,16 @@ if ($VerifyOnly) {
     $appi = $appiJson | ConvertFrom-Json
     Write-Ok "Application Insights ready: $($appi.name)"
 
-    # -- Print connection string ------------------------------------------------
+    # -- Print resource info (connection string redacted) -----------------------
 
-    Write-Step "Application Insights connection string"
+    Write-Step "Application Insights resource"
     $connStr = $appi.connectionString
     if ($connStr) {
+        Write-Ok "Resource: $($appi.name)  (ID: $($appi.id))"
         Write-Host ""
-        Write-Host "  $connStr" -ForegroundColor Yellow
+        Write-Host "  The connection string contains credentials and has been redacted." -ForegroundColor Yellow
+        Write-Host "  Retrieve it from the Azure Portal or Key Vault when needed." -ForegroundColor Yellow
         Write-Host ""
-        Write-Ok "Use this value for APPLICATIONINSIGHTS_CONNECTION_STRING"
     } else {
         Write-Warn "Connection string not found in response. Check the resource in Azure Portal."
     }
@@ -239,7 +240,7 @@ if ($VerifyOnly) {
             '--resource-group', $ResourceGroup,
             '--template-file', $bicepPath,
             '--parameters', "appInsightsName=$AppInsightsName",
-            '--parameters', "workbookDisplayName=MCP Azure Storage - $AppInsightsName",
+            '--parameters', "workbookDisplayName=MCP Azure Storage Monitoring",
             '--parameters', "location=$Location",
             '--query', 'properties.outputs',
             '--output', 'json'
@@ -252,6 +253,9 @@ if ($VerifyOnly) {
                 Write-Host "  Open in Portal: $($wbOutputs.portalUrl.value)" -ForegroundColor Yellow
                 Write-Host ""
             }
+            Write-Warn "NOTE: The workbook requires OTel to be enabled (-EnableOTel flag on"
+            Write-Warn "deploy_to_azure.ps1) for telemetry data to appear. Without OTel,"
+            Write-Warn "the workbook will be empty."
         } else {
             Write-Warn "Workbook deployment failed."
             Write-Host "   Manual import: Portal > App Insights > Workbooks > New > Advanced Editor > paste otel/workbook.json" -ForegroundColor DarkGray
