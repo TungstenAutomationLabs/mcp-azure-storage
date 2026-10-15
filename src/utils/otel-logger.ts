@@ -57,7 +57,14 @@ function emit(
   message: string,
   attributes?: Record<string, string | number | boolean>,
 ): void {
-  // Always write to stdout (preserves existing behaviour).
+  // Check severity filter before any output (console and OTel).
+  const minSev = getMinSeverity();
+  const currentRank = SEVERITY_RANK[severity];
+  if (minSev > 0 && currentRank < minSev) {
+    return;
+  }
+
+  // Write to stdout (only for messages that pass the severity threshold).
   const timestamp = new Date().toISOString();
   const prefix = `[${timestamp}] ${severity}:`;
   if (severity === "ERROR") {
@@ -66,13 +73,6 @@ function emit(
     console.warn(prefix, message, attributes ?? "");
   } else {
     console.log(prefix, message, attributes ?? "");
-  }
-
-  // Check severity filter before emitting OTel records.
-  const minSev = getMinSeverity();
-  const currentRank = SEVERITY_RANK[severity];
-  if (minSev > 0 && currentRank < minSev) {
-    return;
   }
 
   // Fetch the logger LAZILY at emit time so we pick up the real

@@ -28,7 +28,7 @@ if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
 
 // ── Telemetry level ──────────────────────────────────────────────────────────
 
-const level = (process.env.OTEL_TELEMETRY_LEVEL || 'detailed').toLowerCase();
+const level = (process.env.OTEL_TELEMETRY_LEVEL || 'basic').toLowerCase();
 
 if (level === 'off') {
   // Explicitly disabled -- exit with zero overhead.

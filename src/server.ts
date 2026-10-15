@@ -22,6 +22,7 @@
  */
 
 import "dotenv/config"; // Load .env file into process.env (local dev only; ignored in production)
+import { createRequire } from "module";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -52,6 +53,10 @@ import { registerQueueResources } from "./resources/queue-resources.js";
 import { registerTableResources } from "./resources/table-resources.js";
 import { parseDisabledTools, buildDisabledToolError } from "./utils/disabled-tools.js";
 import { info, warn, error as logError, debug } from "./utils/otel-logger.js";
+
+// Read version from package.json to avoid hardcoded version strings.
+const _require = createRequire(import.meta.url);
+const APP_VERSION: string = _require("../package.json").version;
 
 // Re-export for backward compatibility (tests, external consumers)
 export { parseDisabledTools, buildDisabledToolError } from "./utils/disabled-tools.js";
@@ -279,7 +284,7 @@ app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
 function createMcpServer(): McpServer {
   const server = new McpServer({
     name: "azure-storage-mcp",
-    version: "1.2.0",
+    version: APP_VERSION,
   });
 
   // ── Structured error wrapper ───────────────────────────────────────────
@@ -1169,7 +1174,7 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
 // ── Start HTTP server ────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const httpServer = app.listen(PORT, () => {
-  console.log(`\n🚀 MCP Azure Storage Server v1.2.0`);
+  console.log(`\n🚀 MCP Azure Storage Server v${APP_VERSION}`);
   console.log(`   MCP endpoint : http://localhost:${PORT}/mcp`);
   console.log(`   Upload       : http://localhost:${PORT}/upload`);
   console.log(`   Health check : http://localhost:${PORT}/health`);

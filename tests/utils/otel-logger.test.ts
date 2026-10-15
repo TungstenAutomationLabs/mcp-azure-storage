@@ -83,26 +83,36 @@ describe("otel-logger", () => {
   });
 
   describe("severity level filtering", () => {
-    it("respects OTEL_LOG_MIN_SEVERITY=ERROR (filters out INFO)", () => {
+    it("respects OTEL_LOG_MIN_SEVERITY=ERROR (filters out INFO from console)", () => {
       process.env.OTEL_LOG_MIN_SEVERITY = "ERROR";
-      // This tests the OTel emit path, not stdout -- stdout always writes.
-      // We verify no throw and stdout still works.
-      info("should be filtered from OTel");
-      expect(consoleSpy).toHaveBeenCalledTimes(1);
+      info("should be filtered");
+      expect(consoleSpy).toHaveBeenCalledTimes(0);
+    });
+
+    it("filters DEBUG and INFO when min severity is WARN", () => {
+      process.env.OTEL_LOG_MIN_SEVERITY = "WARN";
+      debug("filtered");
+      info("filtered");
+      expect(consoleSpy).toHaveBeenCalledTimes(0);
     });
 
     it("allows messages at or above the minimum severity", () => {
       process.env.OTEL_LOG_MIN_SEVERITY = "WARN";
-      expect(() => error("should pass filter")).not.toThrow();
-      expect(() => warn("should pass filter")).not.toThrow();
+      warn("should pass filter");
+      error("should pass filter");
+      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
     });
 
     it("allows all levels when OTEL_LOG_MIN_SEVERITY is not set", () => {
       delete process.env.OTEL_LOG_MIN_SEVERITY;
-      expect(() => debug("allowed")).not.toThrow();
-      expect(() => info("allowed")).not.toThrow();
-      expect(() => warn("allowed")).not.toThrow();
-      expect(() => error("allowed")).not.toThrow();
+      debug("allowed");
+      info("allowed");
+      warn("allowed");
+      error("allowed");
+      expect(consoleSpy).toHaveBeenCalledTimes(2); // DEBUG + INFO
+      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
     });
   });
 });
