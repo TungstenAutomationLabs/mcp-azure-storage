@@ -57,6 +57,12 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
                                   │  Azure Storage      │
                                   │  (SharedKey auth)   │
                                   └─────────────────────┘
+
+  Optional: OpenTelemetry observability (enabled via OTEL_EXPORTER_OTLP_ENDPOINT)
+
+  Express.js Server  ···OTLP/HTTP···>  OTel Collector   ──Azure Monitor──>  Application Insights
+  (traces, metrics,     :4318          (sidecar)          Exporter           (Log Analytics
+   structured logs)                                                          Workspace)
 ```
 
 ---
@@ -66,69 +72,96 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
 ```
 mcp-azure-storage/
 ├── src/
-│   ├── server.ts              # Express app, MCP transport, session management
-│   ├── config.ts              # Storage config from env vars (singleton)
+│   ├── server.ts                  # Express app, MCP transport, session management
+│   ├── config.ts                  # Storage config from env vars (singleton)
+│   ├── instrumentation.cjs        # OpenTelemetry SDK bootstrap (loaded via --require before app starts)
+│   ├── session-attributes.cjs     # Extracts mcp-session-id header for OTel trace correlation
 │   ├── middleware/
-│   │   └── api-key.ts         # API key auth (X-API-Key / Bearer)
+│   │   └── api-key.ts             # API key auth (X-API-Key / Bearer)
 │   ├── tools/
-│   │   ├── blob-tools.ts      # 13 tools — container + blob CRUD, head, set-tier, SAS, metadata, URL upload
-│   │   ├── queue-tools.ts     #  8 tools — queue CRUD + message operations + lease renewal
-│   │   ├── table-tools.ts     #  5 tools — table CRUD + entity operations
-│   │   ├── fileshare-tools.ts #  8 tools — share/directory/file operations
-│   │   └── utility-tools.ts   #  7 tools — base64, SAS refresh, MIME lookup, upload info
-│   └── utils/
-│       ├── errors.ts              # Structured error mapping + server.tool() wrapper
-│       └── format.ts              # Response formatting (JSON/HTML/MD) utility
-│   └── resources/
-│       ├── blob-resources.ts      #  4 resources — containers, blobs, properties
-│       ├── fileshare-resources.ts #  4 resources — shares, files, properties
-│       ├── queue-resources.ts     #  2 resources — queues, queue properties
-│       └── table-resources.ts     #  2 resources — tables, entity lookup
-├── tests/
-│   ├── setup.ts               # Test env bootstrap (dummy credentials)
-│   ├── config.test.ts         # Config module tests
-│   ├── helpers/
-│   │   └── mcp-test-harness.ts  # Stateless MCP endpoint + SSE-aware helpers
-│   ├── middleware/
-│   │   └── api-key.test.ts    # API key auth tests (503/401/403/pass-through)
-│   ├── tools/
-│   │   ├── blob-tools.test.ts           # 42 tests — mock Azure Blob SDK + SSRF + lifecycle
-│   │   ├── queue-tools.test.ts          # 27 tests — mock Azure Queue SDK + lease renewal
-│   │   ├── table-tools.test.ts          #  7 tests — mock Azure Tables SDK
-│   │   ├── fileshare-tools.test.ts      #  6 tests — mock Azure File Share SDK
-│   │   ├── utility-tools.test.ts        # 10 tests — base64, MIME, container name, upload URL
-│   │   └── structured-errors.test.ts    # 36 tests — error mapping, SAS sanitisation, MCP integration
-│   ├── resources/
-│   │   ├── blob-resources.test.ts      # 6 tests — list cap, download guard
-│   │   ├── queue-resources.test.ts     # 3 tests — list cap, properties
-│   │   ├── table-resources.test.ts     # 3 tests — list cap, entity lookup
-│   │   └── fileshare-resources.test.ts # 4 tests — list cap, size guard
+│   │   ├── blob-tools.ts          # 13 tools -- container + blob CRUD, head, set-tier, SAS, metadata, URL upload
+│   │   ├── queue-tools.ts         #  8 tools -- queue CRUD + message operations + lease renewal
+│   │   ├── table-tools.ts         #  5 tools -- table CRUD + entity operations
+│   │   ├── fileshare-tools.ts     #  8 tools -- share/directory/file operations
+│   │   └── utility-tools.ts       #  7 tools -- base64, SAS refresh, MIME lookup, upload info
 │   ├── utils/
-│   │   └── format.test.ts             # 20 tests — JSON/HTML/MD formatting
+│   │   ├── errors.ts              # Structured error mapping + server.tool() wrapper
+│   │   ├── format.ts              # Response formatting (JSON/HTML/MD) utility
+│   │   ├── otel-logger.ts         # Structured logger with dual console + OTel log record output
+│   │   └── disabled-tools.ts      # Parses DISABLED_TOOLS env var and builds forbidden error responses
+│   └── resources/
+│       ├── blob-resources.ts      #  4 resources -- containers, blobs, properties
+│       ├── fileshare-resources.ts #  4 resources -- shares, files, properties
+│       ├── queue-resources.ts     #  2 resources -- queues, queue properties
+│       └── table-resources.ts     #  2 resources -- tables, entity lookup
+├── otel/
+│   ├── Dockerfile                     # OTel Collector sidecar container image
+│   ├── otel-collector-config.azure.yaml # Collector pipeline config (OTLP receiver, Azure Monitor exporter)
+│   ├── workbook.bicep                 # Azure Monitor Workbook Bicep template
+│   └── workbook.json                  # Workbook definition (KQL dashboards for MCP tool usage, latency, errors)
+├── scripts/
+│   ├── setup-monitoring.ps1       # Provisions Azure Monitor resources (Log Analytics, App Insights, Workbook)
+│   ├── otel-verify.ps1            # End-to-end telemetry verification (20 MCP tool calls with pass/fail reporting)
+│   ├── push-to-acr.ps1            # Builds and pushes container images to Azure Container Registry
+│   ├── setup-acr.ps1              # Provisions Azure Container Registry
+│   ├── teardown.ps1               # Tears down Azure resources
+│   └── helpers/
+│       └── common.ps1             # Shared PowerShell helper functions
+├── tests/
+│   ├── setup.ts                   # Test env bootstrap (dummy credentials)
+│   ├── config.test.ts             # Config module tests
+│   ├── instrumentation.test.ts    # OTel instrumentation bootstrap tests
+│   ├── session-attributes.test.ts # Session attribute extraction tests
+│   ├── upload.test.ts             # Multipart upload endpoint tests
+│   ├── helpers/
+│   │   └── mcp-test-harness.ts    # Stateless MCP endpoint + SSE-aware helpers
+│   ├── middleware/
+│   │   ├── api-key.test.ts        # API key auth tests (503/401/403/pass-through)
+│   │   ├── disabled-tools.test.ts # Disabled-tool gating tests
+│   │   └── rate-limit.test.ts     # Rate limiting tests
+│   ├── tools/
+│   │   ├── blob-tools.test.ts           # Mock Azure Blob SDK + SSRF + lifecycle
+│   │   ├── queue-tools.test.ts          # Mock Azure Queue SDK + lease renewal
+│   │   ├── table-tools.test.ts          # Mock Azure Tables SDK
+│   │   ├── fileshare-tools.test.ts      # Mock Azure File Share SDK
+│   │   ├── utility-tools.test.ts        # base64, MIME, container name, upload URL
+│   │   └── structured-errors.test.ts    # Error mapping, SAS sanitisation, MCP integration
+│   ├── resources/
+│   │   ├── blob-resources.test.ts       # List cap, download guard
+│   │   ├── queue-resources.test.ts      # List cap, properties
+│   │   ├── table-resources.test.ts      # List cap, entity lookup
+│   │   └── fileshare-resources.test.ts  # List cap, size guard
+│   ├── utils/
+│   │   ├── format.test.ts              # JSON/HTML/MD formatting
+│   │   └── otel-logger.test.ts         # OTel logger dual-output tests
 │   └── integration/
-│       ├── blob-integration.test.ts    # Azurite blob CRUD smoke test
-│       ├── queue-integration.test.ts   # Azurite queue CRUD smoke test
-│       └── table-integration.test.ts   # Azurite table CRUD smoke test
+│       ├── blob-integration.test.ts     # Azurite blob CRUD smoke test
+│       ├── queue-integration.test.ts    # Azurite queue CRUD smoke test
+│       ├── table-integration.test.ts    # Azurite table CRUD smoke test
+│       └── upload-integration.test.ts   # Streaming upload integration tests
 ├── infra/
-│   ├── main.bicep             # Azure Container Apps + Storage + Identity + RBAC
-│   └── main.parameters.json   # azd-templated deployment parameters
-├── deploy_to_azure.ps1        # One-command deploy script (reads .env, syncs to azd, deploys)
+│   ├── main.bicep                 # Full Azure infrastructure (Container Apps, Storage, OTel sidecar, alerts)
+│   └── main.parameters.json       # Bicep parameter defaults
+├── img/
+│   ├── ApplicationInsights-Overview.png  # Azure Monitor dashboard screenshot
+│   └── ApplicationInsights-Tools.png     # Per-tool breakdown screenshot
+├── deploy_to_azure.ps1            # One-command deploy script (reads .env, syncs to azd, deploys)
 ├── .github/workflows/
-│   └── ci.yml                 # GitHub Actions — unit + integration tests
-├── docker-compose.azurite.yml # Azurite emulator for local integration tests
-├── vitest.config.ts           # Unit test config (coverage, thresholds)
-├── vitest.integration.config.ts # Integration test config (Azurite)
-├── .env.test                  # Azurite well-known credentials for tests
-├── Dockerfile                 # Multi-stage build, non-root user
-├── .dockerignore              # Excludes .env, docs, infra from image
-├── azure.yaml                 # Azure Developer CLI project definition
-├── ENVIRONMENTS.md            # Multi-environment deployment guide (dev, test, prod)
-├── .azure.env.example         # Template for azd deployment environment variables
-├── .env.example               # Template for local environment variables
-├── .gitignore                 # Ignores .env, dist, node_modules, docs
-├── tsconfig.json              # TypeScript configuration
-├── package.json               # Dependencies and scripts
-└── LICENSE                    # Project license
+│   └── ci.yml                     # GitHub Actions -- unit + integration tests
+├── docker-compose.azurite.yml     # Azurite emulator for local integration tests
+├── vitest.config.ts               # Unit test config (coverage, thresholds)
+├── vitest.integration.config.ts   # Integration test config (Azurite)
+├── .env.test                      # Azurite well-known credentials for tests
+├── Dockerfile                     # Multi-stage build, non-root user
+├── .dockerignore                  # Excludes .env, docs, infra from image
+├── azure.yaml                     # Azure Developer CLI project definition
+├── ENVIRONMENTS.md                # Multi-environment deployment guide (dev, test, prod)
+├── .azure.env.example             # Template for azd deployment environment variables
+├── .env.example                   # Template for local environment variables
+├── .gitignore                     # Ignores .env, dist, node_modules, docs
+├── tsconfig.json                  # TypeScript configuration
+├── package.json                   # Dependencies and scripts
+└── LICENSE                        # Project licence
 ```
 
 ---
@@ -566,7 +599,7 @@ npm run dev
 You should see:
 
 ```
-🚀 MCP Azure Storage Server v1.0.0
+🚀 MCP Azure Storage Server v1.2.2
    MCP endpoint : http://localhost:3000/mcp
    Health check : http://localhost:3000/health
    Modes        : Stateful (session) + Stateless (one-shot)
@@ -1046,15 +1079,23 @@ azd down --purge
 
 ## OpenTelemetry Monitoring
 
-Version 1.2 adds opt-in OpenTelemetry observability. When enabled, traces, metrics, and logs are exported to Azure Monitor / Application Insights via an OTel Collector sidecar.
+Version 1.2 adds opt-in OpenTelemetry observability with a three-tier architecture:
+
+1. **Application layer** -- the MCP server emits traces, metrics, and structured logs via the OpenTelemetry SDK (bootstrapped by [`src/instrumentation.cjs`](src/instrumentation.cjs) via `--require` before the app starts).
+2. **Collector layer** -- an OTel Collector sidecar receives all signals via OTLP/HTTP on port 4318, applies batch processing and severity filtering, and exports to Azure Monitor.
+3. **Monitoring layer** -- Application Insights provides dashboards, alerting, and KQL query access through a Log Analytics Workspace.
 
 **Default behaviour is unchanged** -- OTel activates only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Without it, the server runs exactly as before with zero overhead.
+
+### Zero-overhead Guard
+
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is not set, the instrumentation module ([`src/instrumentation.cjs`](src/instrumentation.cjs)) exits immediately -- no SDK initialisation, no span processors, no performance impact. This means production deployments without observability pay absolutely no cost for having the instrumentation code present.
 
 ### Architecture
 
 ```
 MCP Server  --OTLP/HTTP-->  OTel Collector  --azure_monitor-->  Application Insights
-(Express)                   (sidecar)                           (Log Analytics Workspace)
+(Express)      :4318         (sidecar)         exporter          (Log Analytics Workspace)
 ```
 
 All three signals (traces, metrics, logs) land in a single Application Insights resource, correlated by `operation_Id`.
@@ -1065,20 +1106,31 @@ All three signals (traces, metrics, logs) land in a single Application Insights 
 .\deploy_to_azure.ps1 -EnableOTel
 ```
 
-This provisions Application Insights, builds the OTel Collector sidecar image, and deploys both containers to Azure Container Apps.
+This provisions Application Insights, builds the OTel Collector sidecar image, and deploys both containers to Azure Container Apps. The Bicep parameter `ENABLE_OTEL` (default `false`) controls whether the sidecar and Application Insights resources are deployed.
 
 ### Telemetry Levels
 
 Control data volume and cost via `OTEL_TELEMETRY_LEVEL`:
 
-| Level | Traces | Metrics | Logs | Estimated cost |
-|-------|--------|---------|------|----------------|
-| `off` | None | None | None | Zero |
-| `basic` (default) | 10% sampled | 60s interval | WARN+ only | ~$1-4/mo |
-| `detailed` | 100% | 15s interval | INFO+ | ~$5-20/mo |
-| `full` | All + internal | 5s interval | All incl. DEBUG | ~$20-100+/mo |
+| Level | Trace Sampling | Log Severity | Metrics Interval | Use Case |
+|-------|---------------|-------------|-----------------|----------|
+| `off` | Disabled | Disabled | Disabled | No telemetry overhead |
+| `basic` (default) | 10% | WARN+ | 60s | Production |
+| `detailed` | 100% | INFO+ | 15s | Staging / troubleshooting |
+| `full` | 100% (always_on) | All | 5s | Development / debugging |
 
-Cost depends on request volume. The first 5 GB/month of Application Insights data ingestion is free.
+Cost depends on request volume. The first 5 GB/month of Application Insights data ingestion is free. Estimated costs: `basic` ~$1-4/mo, `detailed` ~$5-20/mo, `full` ~$20-100+/mo.
+
+### Session Correlation
+
+The `mcp-session-id` HTTP header is extracted by [`src/session-attributes.cjs`](src/session-attributes.cjs) and attached to spans as a `session.id` attribute. This enables per-session trace filtering in Application Insights -- you can query all operations belonging to a single MCP client session using `customDimensions.session.id` in KQL.
+
+### Structured Logging
+
+The [`otel-logger`](src/utils/otel-logger.ts) provides `debug()`, `info()`, `warn()`, and `error()` functions that emit to both:
+
+- **Console** -- filtered by `OTEL_LOG_MIN_SEVERITY` (e.g. `WARN` suppresses `info` and `debug` output)
+- **OpenTelemetry log records** -- with automatic trace correlation (`trace_id`, `span_id`) so logs appear alongside their parent spans in Application Insights
 
 ### Dashboard
 
@@ -1088,6 +1140,8 @@ When OTel is enabled, an Azure Workbook is deployed with four tabs:
 - **Tools** -- Per-tool call distribution, latency breakdown, error rates
 - **Data Volume** -- Blob payload sizes, daily data transfer, request counts by tool
 - **Logs** -- Severity distribution, correlated log stream
+
+The workbook definition lives in [`otel/workbook.json`](otel/workbook.json) and is deployed via the Bicep template [`otel/workbook.bicep`](otel/workbook.bicep). It provides pre-built KQL dashboards for MCP tool usage, latency percentiles, error rates, and dependency health.
 
 #### Application Insights Overview
 
@@ -1103,10 +1157,28 @@ When OTel is enabled, an Azure Workbook is deployed with four tabs:
 
 ### Alert Rules
 
-Two warning-level alert rules are created (no notifications by default):
+Two pre-configured alert rules are created in [`infra/main.bicep`](infra/main.bicep) (no notifications by default):
 
-- **High Error Rate** -- Fires when error rate exceeds 10% over two consecutive 5-minute windows
-- **Latency Degradation** -- Fires when P95 latency exceeds 3 standard deviations above the 1-hour baseline
+- **High Error Rate** -- Fires when more than 10% of requests return 5xx errors in a 5-minute window
+- **Latency Degradation** -- Fires when P95 response time exceeds 5 seconds over a 5-minute window
+
+### Monitoring Setup
+
+```powershell
+# Provision Azure Monitor resources (Log Analytics, App Insights, Workbook)
+.\scripts\setup-monitoring.ps1 -ResourceGroup "my-rg" -AppInsightsName "my-appi"
+
+# Verify telemetry is flowing (end-to-end check)
+.\scripts\otel-verify.ps1
+```
+
+The [`scripts/setup-monitoring.ps1`](scripts/setup-monitoring.ps1) script is idempotent and supports a `-VerifyOnly` mode to check that telemetry is arriving without provisioning anything:
+
+```powershell
+.\scripts\setup-monitoring.ps1 -ResourceGroup "my-rg" -AppInsightsName "my-appi" -VerifyOnly
+```
+
+The [`scripts/otel-verify.ps1`](scripts/otel-verify.ps1) script exercises 20 MCP tool calls across all categories (blob, queue, table, utility) and reports pass/fail for each, providing confidence that the full telemetry pipeline is working.
 
 ### Local Development
 
@@ -1124,20 +1196,6 @@ docker run -d --name otel-collector \
 
 # Set the endpoint in .env
 echo "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" >> .env
-```
-
-### Standalone Monitoring Setup
-
-To provision Azure Monitor resources independently of the main deployment:
-
-```powershell
-.\scripts\setup-monitoring.ps1 -ResourceGroup "my-rg" -AppInsightsName "my-appi"
-```
-
-To verify telemetry is arriving:
-
-```powershell
-.\scripts\setup-monitoring.ps1 -ResourceGroup "my-rg" -AppInsightsName "my-appi" -VerifyOnly
 ```
 
 ---
@@ -1168,8 +1226,21 @@ To verify telemetry is arriving:
 | `MAX_JSON_BODY_BYTES` | No | `52428800` | Hard byte limit for JSON request bodies on `/mcp`. Default: 50 MiB. Controls `express.json({ limit })`. Oversized JSON bodies return HTTP 413. |
 | `MAX_QUEUE_VISIBILITY_SECONDS` | No | `3600` | Maximum allowed visibility timeout (lease duration) for `queue-update-message` and `queue-renew-lease`. Default: 3600 (1 hour). Azure Queue Storage supports up to 7 days, but this server-side cap prevents accidentally setting very long leases. |
 | `DISABLED_TOOLS` | No | _(empty)_ | Comma-separated list of tool names to disable at runtime. Disabled tools are **omitted from `tools/list`** and return a structured `"forbidden"` error (code `"forbidden"`, `data.reason: "disabled_tool"`) when invoked via `tools/call`. Values are **case-insensitive** and whitespace is trimmed. Unknown names trigger a startup warning but do not prevent the server from starting. Example: `DISABLED_TOOLS=blob-delete,fileshare-delete-share,table-delete,queue-delete`. |
+| `AZURE_USE_MANAGED_IDENTITY` | No | `false` | Use Azure Managed Identity instead of shared key authentication. |
 
-> **Note:** The Azure deployment uses `minReplicas: 1` to keep at least one replica always running, ensuring consistent response times and no cold-start connection drops. The Container App auto-scales up to 5 replicas under load (HTTP concurrency threshold: 20 requests). If you want to reduce costs in a non-production environment, you can set `minReplicas: 0` in [`infra/main.bicep`](infra/main.bicep:342), but be aware that scale-to-zero causes 10–30 second cold starts that may time out HTTP clients like Postman.
+### Observability
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | OTLP endpoint URL (e.g. `http://localhost:4318`). OTel is completely disabled when unset -- zero overhead. |
+| `OTEL_TELEMETRY_LEVEL` | `basic` | Telemetry preset: `off`, `basic` (10% sampling, WARN+ logs, 60s metrics), `detailed` (100%, INFO+, 15s), `full` (always-on, 5s, all logs). |
+| `OTEL_SERVICE_NAME` | `mcp-azure-storage` | Service name reported in traces and metrics. |
+| `OTEL_LOG_MIN_SEVERITY` | *(per preset)* | Minimum severity for both console and OTel log output (e.g. `WARN`, `INFO`, `ERROR`). |
+| `OTEL_TRACES_SAMPLER_ARG` | *(per preset)* | Trace sampling ratio (`0.0` to `1.0`). Overrides the preset value. |
+| `OTEL_METRICS_EXPORT_INTERVAL_MS` | *(per preset)* | Metrics export interval in milliseconds. Overrides the preset value. |
+| `ENABLE_OTEL` | `false` | Bicep parameter to deploy the OTel Collector sidecar and Application Insights. |
+
+> **Note:** The Azure deployment uses `minReplicas: 1` to keep at least one replica always running, ensuring consistent response times and no cold-start connection drops. The Container App auto-scales up to 5 replicas under load (HTTP concurrency threshold: 20 requests). If you want to reduce costs in a non-production environment, you can set `minReplicas: 0` in [`infra/main.bicep`](infra/main.bicep:342), but be aware that scale-to-zero causes 10-30 second cold starts that may time out HTTP clients like Postman.
 
 ### Connection Stability (Azure Container Apps)
 
@@ -1185,22 +1256,26 @@ The deployment includes three mechanisms to ensure reliable connections:
 
 ## Security
 
-- **Fail-closed authentication** — all requests are rejected if `MCP_API_KEY` is not set
-- **Constant-time comparison** — API key validation uses `crypto.timingSafeEqual` to prevent timing attacks
-- **No query-param auth** — API keys are only accepted via headers (not URLs that leak to logs)
-- **SSRF protection** — `blob-upload-from-url` validates URLs before fetching: blocks loopback, link-local (Azure IMDS 169.254.169.254), private RFC 1918 ranges, non-HTTP schemes, and open redirects (`redirect: "error"`)
-- **Streaming uploads** — `POST /upload` streams directly to Azure Blob Storage via busboy + `uploadStream` (no temp files, no full-file buffering). Capped at `MAX_UPLOAD_BYTES` (default 5 GiB); oversized files return 413 with `code: "too_large"`. Rate-limited by the same per-identity limiter as `/mcp`
-- **Helmet** — sets security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
-- **Rate limiting** — per-IP request throttling on both `/mcp` and `/upload` endpoints
-- **Session TTL** — idle sessions are automatically evicted after 30 minutes
-- **Non-root Docker** — container runs as unprivileged `appuser`
-- **User-assigned managed identity** — ACR pull + Storage RBAC with no circular dependency
-- **Secrets in Bicep** — storage keys and API keys are injected as Container App secrets via `@secure()` parameters
-- **`.env` gitignored** — credentials never enter version control
+- **Fail-closed authentication** -- the server returns 503 if `MCP_API_KEY` is not set in the environment; no requests are processed until a key is configured
+- **API key authentication** -- accepts `X-API-Key` header or `Authorization: Bearer` token; validated with `crypto.timingSafeEqual` for constant-time comparison to prevent timing attacks
+- **No query-param auth** -- API keys are only accepted via headers (not URLs that leak to logs)
+- **Disabled tools** -- the `DISABLED_TOOLS` env var restricts tool access at runtime; disabled tools are omitted from `tools/list` and return structured `"forbidden"` errors (with `data.reason: "disabled_tool"`) when invoked via `tools/call`
+- **SSRF protection** -- `blob-upload-from-url` validates URLs before fetching: blocks loopback, link-local (Azure IMDS 169.254.169.254), private RFC 1918 ranges, non-HTTP schemes, and open redirects (`redirect: "error"`)
+- **Streaming uploads** -- `POST /upload` streams directly to Azure Blob Storage via busboy + `uploadStream` (no temp files, no full-file buffering). Capped at `MAX_UPLOAD_BYTES` (default 5 GiB); oversized files return 413 with `code: "too_large"`. Rate-limited by the same per-identity limiter as `/mcp`
+- **Helmet** -- sets security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
+- **Rate limiting** -- per-IP request throttling on both `/mcp` and `/upload` endpoints
+- **Session TTL** -- idle sessions are automatically evicted after 30 minutes
+- **Non-root Docker** -- container runs as unprivileged `appuser`
+- **User-assigned managed identity** -- ACR pull + Storage RBAC with no circular dependency
+- **Secrets in Bicep** -- storage keys and API keys are injected as Container App secrets via `@secure()` parameters
+- **Connection string handling** -- Application Insights connection string is stored as a Container Apps secret and redacted from script output
+- **`.env` gitignored** -- credentials never enter version control
 
 ---
 
 ## Scripts
+
+### npm Scripts
 
 | Script | Command | Description |
 |--------|---------|-------------|
@@ -1217,14 +1292,23 @@ The deployment includes three mechanisms to ensure reliable connections:
 | `azd:test` | `npm run azd:test` | Provision + deploy to test environment |
 | `azd:test:provision` | `npm run azd:test:provision` | Provision test infrastructure only |
 | `azd:test:deploy` | `npm run azd:test:deploy` | Deploy app to test only (skip provision) |
-| -- | `.\deploy_to_azure.ps1` | Reads `.env`, syncs vars to azd env, runs `azd up` (add `-SkipProvision` for code-only deploy, `-LifecyclePolicy one-way\|smart` for auto-tiering) |
-| -- | `.\scripts\otel-verify.ps1` | Exercises all tool categories via MCP JSON-RPC to generate OTel telemetry (blob, queue, table, utility); includes error cases and cleanup. Use `-Endpoint` and `-ApiKey` or reads from azd env / `.env`. |
+
+### PowerShell Scripts
+
+| Script | Purpose |
+|--------|---------|
+| [`deploy_to_azure.ps1`](deploy_to_azure.ps1) | Full deployment automation with `-EnableOTel`, `-LifecyclePolicy`, `-LogRetentionDays` switches |
+| [`scripts/setup-monitoring.ps1`](scripts/setup-monitoring.ps1) | Idempotent Azure Monitor provisioning and verification (`-VerifyOnly` mode) |
+| [`scripts/otel-verify.ps1`](scripts/otel-verify.ps1) | End-to-end telemetry verification with 20 MCP tool calls |
+| [`scripts/push-to-acr.ps1`](scripts/push-to-acr.ps1) | Build and push container images to ACR |
+| [`scripts/setup-acr.ps1`](scripts/setup-acr.ps1) | Provision Azure Container Registry |
+| [`scripts/teardown.ps1`](scripts/teardown.ps1) | Tear down Azure resources |
 
 ---
 
 ## Testing
 
-### Unit Tests (312 tests, no Azure required)
+### Unit Tests (330 tests across 19 test files, no Azure required)
 
 Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
 
@@ -1239,7 +1323,7 @@ npm run test:watch
 npm run test:coverage
 ```
 
-**Test coverage:** Config, API key middleware, rate limiting, disabled-tool gating, structured errors, all 42 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD).
+**Test coverage:** Config, API key middleware, rate limiting, disabled-tool gating, structured errors, all 42 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD), OTel instrumentation bootstrap, session attribute extraction, multipart upload endpoint, and OTel logger dual-output.
 
 ### Integration Tests (Azurite)
 
@@ -1306,26 +1390,35 @@ The [`.github/workflows/ci.yml`](.github/workflows/ci.yml) workflow runs on ever
 
 ```
 tests/
-├── helpers/mcp-test-harness.ts   # createTestApp(), mcpPost(), SSE parsers
-├── config.test.ts                # getStorageConfig singleton + env vars
-├── middleware/api-key.test.ts    # Auth middleware (503/401/403/pass-through)
-├── tools/                        # vi.mock Azure SDKs → test via MCP endpoint
+├── helpers/mcp-test-harness.ts    # createTestApp(), mcpPost(), SSE parsers
+├── config.test.ts                 # getStorageConfig singleton + env vars
+├── instrumentation.test.ts        # OTel instrumentation bootstrap tests
+├── session-attributes.test.ts     # Session attribute extraction tests
+├── upload.test.ts                 # Multipart upload endpoint tests
+├── middleware/
+│   ├── api-key.test.ts            # Auth middleware (503/401/403/pass-through)
+│   ├── disabled-tools.test.ts     # Disabled-tool gating tests
+│   └── rate-limit.test.ts         # Rate limiting tests
+├── tools/                         # vi.mock Azure SDKs -> test via MCP endpoint
 │   ├── blob-tools.test.ts
 │   ├── queue-tools.test.ts
 │   ├── table-tools.test.ts
 │   ├── fileshare-tools.test.ts
 │   ├── utility-tools.test.ts
-│   └── structured-errors.test.ts # Error mapping, SAS sanitisation, MCP integration
-├── resources/                    # vi.hoisted + vi.mock for module-scope clients
+│   └── structured-errors.test.ts  # Error mapping, SAS sanitisation, MCP integration
+├── resources/                     # vi.hoisted + vi.mock for module-scope clients
 │   ├── blob-resources.test.ts
 │   ├── queue-resources.test.ts
 │   ├── table-resources.test.ts
 │   └── fileshare-resources.test.ts
-└── integration/                  # Real CRUD against Azurite (gated by TEST_INTEGRATION)
-    ├── blob-integration.test.ts    # Blob CRUD + head + set-tier + versioned reads
-    ├── queue-integration.test.ts   # Queue CRUD + update-message + renew-lease
-    ├── upload-integration.test.ts  # Streaming upload via POST /upload (large tests gated)
-    └── table-integration.test.ts   # Table CRUD smoke test
+├── utils/
+│   ├── format.test.ts             # JSON/HTML/MD formatting
+│   └── otel-logger.test.ts        # OTel logger dual-output tests
+└── integration/                   # Real CRUD against Azurite (gated by TEST_INTEGRATION)
+    ├── blob-integration.test.ts     # Blob CRUD + head + set-tier + versioned reads
+    ├── queue-integration.test.ts    # Queue CRUD + update-message + renew-lease
+    ├── upload-integration.test.ts   # Streaming upload via POST /upload (large tests gated)
+    └── table-integration.test.ts    # Table CRUD smoke test
 ```
 
 ---
