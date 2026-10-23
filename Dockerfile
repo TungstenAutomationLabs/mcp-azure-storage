@@ -15,7 +15,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build — compile TypeScript to JavaScript
 # ---------------------------------------------------------------------------
-FROM node:20-alpine AS builder
+FROM node:26-alpine AS builder
 WORKDIR /app
 
 # Copy manifests first so Docker caches the npm-install layer when only
@@ -34,7 +34,7 @@ RUN npx tsc \
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — minimal production image
 # ---------------------------------------------------------------------------
-FROM node:20-alpine AS production
+FROM node:26-alpine AS production
 
 # Create a non-root user/group for least-privilege execution.
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup

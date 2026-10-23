@@ -552,7 +552,7 @@ Then upload directly to Azure Blob Storage using the SAS token from the response
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) 20+
+- [Node.js](https://nodejs.org/) 26+
 - An **Azure Storage Account** with access keys
 - [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/) + [Azure Developer CLI (`azd`)](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/) for deployment
 
@@ -742,7 +742,7 @@ RooCode supports Streamable HTTP transport natively. Add to your VS Code MCP set
 
 Claude Desktop does not natively support remote HTTP MCP servers — it only connects to local stdio processes. To bridge the gap, use [`mcp-remote`](https://www.npmjs.com/package/mcp-remote), which acts as a local stdio-to-HTTP proxy.
 
-**Prerequisites:** [Node.js](https://nodejs.org/) 20+ must be installed.
+**Prerequisites:** [Node.js](https://nodejs.org/) 26+ must be installed.
 
 **Setup:**
 

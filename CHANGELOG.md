@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] -- 2026-10-22
+
+### Changed
+- **Node.js runtime** -- migrated from Node.js 20 to Node.js 26.12.1
+  - `engines` field in `package.json` updated to `>=26.0.0`
+  - Dockerfile base images updated from `node:20-alpine` to `node:26-alpine`
+  - CI matrix updated from `[20, 22]` to `[26]`
+  - README prerequisites updated to require Node.js 26+
+- **Vitest** upgraded from 4.1.11 to 5.0.5 (resolves 3 moderate security advisories: GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp)
+- **ip-address** transitive dependency updated to resolve ReDoS advisory (GHSA-rxp7-6hxx-x8q5)
+- Zero npm audit vulnerabilities
+
+### Breaking Changes
+
+- **Node.js 20/22 no longer supported** -- the minimum required version is now Node.js 26.0.0.
+  Update your local development environment and CI/CD runners before upgrading.
+
 ## [1.2.2] -- 2026-10-15
 
 ### Fixed
