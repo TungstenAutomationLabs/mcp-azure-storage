@@ -101,6 +101,10 @@ if ([string]::IsNullOrEmpty($EnvFile)) {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Suppress azd CLI update-available notifications. These write to stderr,
+# which PowerShell's ErrorActionPreference=Stop promotes to terminating errors.
+$env:AZURE_DEV_UPDATES_CHECK_DISABLED = "true"
+
 # -- Helper functions for coloured output --
 function Write-Step  { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }
 function Write-Ok    { param([string]$msg) Write-Host "   [OK] $msg" -ForegroundColor Green }
