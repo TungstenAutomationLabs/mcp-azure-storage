@@ -37,6 +37,9 @@
     },
     "otelLogMinSeverity": {
       "value": "${OTEL_LOG_MIN_SEVERITY}"
+    },
+    "otelScrubPii": {
+      "value": "${OTEL_SCRUB_PII=true}"
     }
   }
 }

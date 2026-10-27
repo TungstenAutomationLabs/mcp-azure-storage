@@ -113,6 +113,9 @@ param otelTelemetryLevel string = 'detailed'
 @description('Minimum log severity for the OTel Collector log filter (9=INFO, 13=WARN)')
 param otelLogMinSeverity string = '9'
 
+@description('Enable PII scrubbing of blob/container names in OTel span attributes (true/false)')
+param otelScrubPii string = 'true'
+
 // Computed flag: true when the user is bringing their own storage account.
 var useExistingStorage = !empty(existingStorageAccountName) && !empty(existingStorageAccountKey)
 
@@ -372,8 +375,27 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (!us
   kind: 'StorageV2'
   properties: {
     accessTier: 'Hot'
+    // -- Encryption in transit: require HTTPS and TLS 1.2+ --
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
+    // -- Encryption at rest: explicit SSE with Microsoft-managed keys --
+    // Azure Storage encrypts all data at rest by default, but declaring the
+    // encryption block explicitly makes the posture auditable and prevents
+    // configuration drift. All four services (blob, file, queue, table) are
+    // covered with account-scoped keys.
+    encryption: {
+      services: {
+        blob: { enabled: true, keyType: 'Account' }
+        file: { enabled: true, keyType: 'Account' }
+        queue: { enabled: true, keyType: 'Account' }
+        table: { enabled: true, keyType: 'Account' }
+      }
+      keySource: 'Microsoft.Storage'
+    }
+    // -- Shared key access --
+    // Required for SAS token generation. When managed identity is fully adopted
+    // and User Delegation SAS is used exclusively, this can be set to false.
+    allowSharedKeyAccess: true
   }
 }
 
@@ -630,6 +652,14 @@ var otelInstrumentationEnv = [
   {
     name: 'OTEL_TELEMETRY_LEVEL'
     value: otelTelemetryLevel
+  }
+  {
+    // PII scrubbing for OTel span attributes. When 'true' (default),
+    // blob names, container names, and URLs are SHA-256 hashed before
+    // being set as span attributes, preventing sensitive file names
+    // from leaking into Application Insights / trace backends.
+    name: 'OTEL_SCRUB_PII'
+    value: otelScrubPii
   }
 ]
 

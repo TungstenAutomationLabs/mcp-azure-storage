@@ -17,6 +17,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { maybeScrubBlobName, maybeScrubContainerName } from "./pii-scrubber.js";
 
 // ── Structured error shape ───────────────────────────────────────────────────
 
@@ -451,14 +452,25 @@ export function wrapToolErrorHandler(server: McpServer): void {
 
             // Blob-specific span enrichment: set container, blob name, and
             // content length (when known) from the handler parameters.
+            // PII scrubbing: blob names and container names are passed through
+            // the PII scrubber before being set as span attributes, since they
+            // may contain personally identifiable information (e.g. file names
+            // like "john-doe-passport.pdf"). Controlled by OTEL_SCRUB_PII env
+            // var (default: true).
             if (toolName?.startsWith("blob-")) {
               const params = handlerArgs[0] as Record<string, unknown> | undefined;
               if (params && typeof params === "object") {
                 if (typeof params.containerName === "string") {
-                  span.setAttribute("blob.container_name", params.containerName);
+                  span.setAttribute(
+                    "blob.container_name",
+                    maybeScrubContainerName(params.containerName),
+                  );
                 }
                 if (typeof params.blobName === "string") {
-                  span.setAttribute("blob.name", params.blobName);
+                  span.setAttribute(
+                    "blob.name",
+                    maybeScrubBlobName(params.blobName),
+                  );
                 }
                 // Estimate content length from base64 payload (blob-create).
                 if (typeof params.contentBase64 === "string") {

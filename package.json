@@ -1,6 +1,6 @@
 {
   "name": "mcp-azure-storage",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "MCP server for Azure Storage -- Blob, Queue, Table, and File Share",
   "type": "module",
   "main": "dist/server.js",
@@ -72,5 +72,8 @@
     "typescript": "^6.0.2",
     "vite": "^6.4.0",
     "vitest": "^5.0.5"
+  },
+  "overrides": {
+    "@azure/msal-node": ">=7.1.1"
   }
 }

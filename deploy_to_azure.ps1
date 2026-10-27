@@ -501,6 +501,14 @@ $otelLogMinSeverity = if ($envVars.ContainsKey("OTEL_LOG_MIN_SEVERITY") -and -no
 azd env set OTEL_LOG_MIN_SEVERITY $otelLogMinSeverity --no-prompt 2>$null
 Write-Ok "OTel log min severity: $otelLogMinSeverity"
 
+$otelScrubPii = if ($envVars.ContainsKey("OTEL_SCRUB_PII") -and -not [string]::IsNullOrEmpty($envVars["OTEL_SCRUB_PII"])) {
+    $envVars["OTEL_SCRUB_PII"]
+} else {
+    'true'
+}
+azd env set OTEL_SCRUB_PII $otelScrubPii --no-prompt 2>$null
+Write-Ok "OTel PII scrubbing: $otelScrubPii"
+
 # -- 6. Show summary before deploying --
 Write-Step "Deployment summary"
 Write-Host "  Environment:     $envName" -ForegroundColor White

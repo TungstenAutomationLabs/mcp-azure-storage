@@ -83,6 +83,62 @@ const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
 const { BatchLogRecordProcessor } = require('@opentelemetry/sdk-logs');
 const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
 const { sessionAttributes } = require('./session-attributes.cjs');
+const crypto = require('crypto');
+
+// ── PII scrubbing for outbound HTTP spans ────────────────────────────────────
+// Mirrors the logic in src/utils/pii-scrubber.ts but in plain CJS so it can
+// be used at instrumentation load time (before ESM modules are available).
+// Controlled by OTEL_SCRUB_PII env var (default: true).
+
+const HASH_PREFIX_LEN = 8;
+
+function isPiiScrubEnabled() {
+  var raw = (process.env.OTEL_SCRUB_PII || 'true').toLowerCase().trim();
+  return raw !== 'false' && raw !== '0';
+}
+
+function hashSeg(value) {
+  return crypto
+    .createHash('sha256')
+    .update(value)
+    .digest('hex')
+    .slice(0, HASH_PREFIX_LEN);
+}
+
+function scrubBlobPath(blobPath) {
+  if (!blobPath) return blobPath;
+  var segments = blobPath.split('/').filter(function (s) { return s.length > 0; });
+  var scrubbed = segments.map(function (seg) {
+    var dotIdx = seg.lastIndexOf('.');
+    if (dotIdx > 0 && dotIdx < seg.length - 1) {
+      return hashSeg(seg.slice(0, dotIdx)) + seg.slice(dotIdx);
+    }
+    return hashSeg(seg);
+  });
+  return scrubbed.join('/');
+}
+
+/**
+ * Scrub Azure Storage URLs in outbound HTTP span attributes.
+ *
+ * Detects URLs targeting *.blob.core.windows.net and replaces the
+ * blob path with hashed segments to prevent PII leakage.
+ */
+function scrubStorageUrl(url) {
+  if (!url || !isPiiScrubEnabled()) return url;
+  // Match: https://<account>.blob.core.windows.net/<container>/<blobPath>?<query>
+  var match = url.match(
+    /^(https?:\/\/[^/]+\.blob\.core\.windows\.net\/)([^/?]+)(\/[^?]*)(\?.*)?$/
+  );
+  if (match) {
+    var prefix = match[1];
+    var container = match[2];
+    var path = match[3]; // starts with "/"
+    var query = match[4] || '';
+    return prefix + hashSeg(container) + '/' + scrubBlobPath(path.slice(1)) + query;
+  }
+  return url;
+}
 
 // ── Severity number mapping for log filtering ────────────────────────────────
 
@@ -121,9 +177,36 @@ const instrumentations = getNodeAutoInstrumentations({
   // fs instrumentation is too noisy -- disable it.
   '@opentelemetry/instrumentation-fs': { enabled: false },
   // Attach session attributes to incoming HTTP spans.
+  // PII scrubbing: outbound HTTP spans to Azure Storage contain blob
+  // names in url.full / http.url attributes. The applyCustomAttributesOnSpan
+  // hook scrubs these URLs after the span is created, replacing blob paths
+  // with SHA-256 hashes. Controlled by OTEL_SCRUB_PII env var.
   '@opentelemetry/instrumentation-http': {
     startIncomingSpanHook: function (request) {
       return sessionAttributes(request);
+    },
+    applyCustomAttributesOnSpan: function (span) {
+      if (!isPiiScrubEnabled()) return;
+      // Scrub URL attributes that may contain blob names / PII.
+      // The OTel HTTP instrumentation sets these as span attributes.
+      var urlAttrs = ['url.full', 'http.url', 'http.target'];
+      for (var i = 0; i < urlAttrs.length; i++) {
+        var attr = urlAttrs[i];
+        // Span attributes are read-only via public API, but we can
+        // overwrite by calling setAttribute again with the scrubbed value.
+        // The span object from the callback exposes the attributes object.
+        try {
+          var attrs = span.attributes;
+          if (attrs && typeof attrs[attr] === 'string') {
+            var scrubbed = scrubStorageUrl(attrs[attr]);
+            if (scrubbed !== attrs[attr]) {
+              span.setAttribute(attr, scrubbed);
+            }
+          }
+        } catch (e) {
+          // Swallow -- never break instrumentation for scrubbing errors.
+        }
+      }
     },
   },
 });

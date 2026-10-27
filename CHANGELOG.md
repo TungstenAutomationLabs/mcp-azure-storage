@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] -- 2026-10-27
+
+### Security
+- **npm audit** -- resolved all 5 vulnerabilities (body-parser high, fast-uri moderate x4, zod high, @azure/msal-node high x2) via `npm audit fix` and `overrides` in `package.json` forcing `@azure/msal-node>=7.1.1`
+- **Encryption at rest** -- added explicit SSE (Storage Service Encryption) block to storage account in `infra/main.bicep` covering blob, file, queue, and table services with Microsoft-managed keys
+- **BYOSA HTTPS validation** -- `src/config.ts` now logs a `[SECURITY WARNING]` when custom service URLs use plain HTTP (excludes localhost for Azurite compatibility)
+
+### Added
+- **PII scrubbing for OTel telemetry** -- new 3-layer defence-in-depth to prevent sensitive file names leaking into traces:
+  1. **Application layer** (`src/utils/pii-scrubber.ts`) -- SHA-256 hashed segments for blob names, container names, and URLs; preserves directory structure and file extensions; controlled by `OTEL_SCRUB_PII` env var (default: `true`)
+  2. **HTTP instrumentation hook** (`src/instrumentation.cjs`) -- `applyCustomAttributesOnSpan` scrubs `url.full`, `http.url`, and `http.target` span attributes on outbound HTTP spans
+  3. **OTel Collector processor** (`otel/otel-collector-config.azure.yaml`) -- `transform/scrub_pii` processor with OTTL statements for defence-in-depth scrubbing of trace and log pipelines
+- **`OTEL_SCRUB_PII` env var** -- configurable via `.env`, Bicep (`infra/main.bicep`), parameters (`infra/main.parameters.json`), and deploy script (`deploy_to_azure.ps1`); defaults to `true`
+- **Unit tests** (`tests/utils/pii-scrubber.test.ts`) -- 30 tests covering `hashSegment`, `scrubBlobName`, `scrubContainerName`, `scrubUrl`, `isPiiScrubEnabled`, and conditional scrubbing functions
+
+### Changed
+- `src/utils/errors.ts` -- span attribute enrichment now uses `maybeScrubBlobName()` and `maybeScrubContainerName()` for `blob.name` and `blob.container_name` attributes
+
 ## [1.2.3] -- 2026-10-22
 
 ### Changed

@@ -67,6 +67,25 @@ processors:
         value: "${OTEL_DEPLOYMENT_ENV}"
         action: upsert
 
+  # PII scrubbing -- belt-and-suspenders defence-in-depth.
+  # The application layer (pii-scrubber.ts / instrumentation.cjs) performs
+  # primary scrubbing. This collector-side processor catches anything that
+  # slips through, e.g. URLs or log bodies containing file names that
+  # look like personal documents.
+  transform/scrub_pii:
+    trace_statements:
+      - context: span
+        statements:
+          # Scrub Azure Storage blob paths from URL attributes.
+          # Replaces everything after the container name with [SCRUBBED].
+          - replace_pattern(attributes["url.full"], "(blob\\.core\\.windows\\.net/[^/]+/)([^?]+)", "$$1[SCRUBBED]")
+          - replace_pattern(attributes["http.url"], "(blob\\.core\\.windows\\.net/[^/]+/)([^?]+)", "$$1[SCRUBBED]")
+    log_statements:
+      - context: log
+        statements:
+          # Scrub common PII-bearing file extensions from log bodies.
+          - replace_pattern(body, "[A-Za-z0-9._-]+\\.(pdf|docx|xlsx|csv|jpg|png|txt|pptx)", "[SCRUBBED].$$1")
+
 exporters:
   # The collector-contrib 0.127.0 image requires the no-underscore
   # spelling: azuremonitor (not azure_monitor).
@@ -85,7 +104,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [resourcedetection, resource/deployment_env, batch]
+      processors: [resourcedetection, resource/deployment_env, transform/scrub_pii, batch]
       exporters: [azuremonitor]
     metrics:
       receivers: [otlp]
@@ -93,5 +112,5 @@ service:
       exporters: [azuremonitor]
     logs:
       receivers: [otlp]
-      processors: [filter/logs, resourcedetection, resource/deployment_env, batch]
+      processors: [filter/logs, resourcedetection, resource/deployment_env, transform/scrub_pii, batch]
       exporters: [azuremonitor]

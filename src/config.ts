@@ -140,6 +140,32 @@ export function getStorageConfig(): StorageConfig {
     fileServiceUrl: process.env.AZURE_FILE_SERVICE_URL || undefined,
   };
 
+  // -- BYOSA HTTPS validation --
+  // When using custom service URLs (bring-your-own storage or Azurite),
+  // warn if any URL uses plain HTTP and is not targeting localhost/127.0.0.1.
+  // Localhost HTTP is expected for Azurite; remote HTTP is a security risk.
+  const serviceUrls: Array<{ name: string; url: string | undefined }> = [
+    { name: "Blob", url: _config.blobServiceUrl },
+    { name: "Queue", url: _config.queueServiceUrl },
+    { name: "Table", url: _config.tableServiceUrl },
+    { name: "File", url: _config.fileServiceUrl },
+  ];
+
+  for (const { name, url } of serviceUrls) {
+    if (url && url.startsWith("http://")) {
+      const isLocalhost =
+        url.startsWith("http://localhost") ||
+        url.startsWith("http://127.0.0.1") ||
+        url.startsWith("http://[::1]");
+      if (!isLocalhost) {
+        console.warn(
+          `[SECURITY WARNING] ${name} service URL uses plain HTTP (${url}). ` +
+          `Data in transit will NOT be encrypted. Use HTTPS unless targeting a local emulator.`
+        );
+      }
+    }
+  }
+
   return _config;
 }
 
