@@ -101,9 +101,32 @@ if ([string]::IsNullOrEmpty($EnvFile)) {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Suppress azd CLI update-available notifications. These write to stderr,
-# which PowerShell's ErrorActionPreference=Stop promotes to terminating errors.
-$env:AZURE_DEV_UPDATES_CHECK_DISABLED = "true"
+# -- Helper: invoke azd without stderr-to-error promotion --
+# azd writes update-available notices and telemetry warnings to stderr.
+# PowerShell 5.1 + $ErrorActionPreference=Stop promotes ANY stderr output from
+# native commands to a terminating error, even when the exit code is 0.
+# This wrapper temporarily relaxes ErrorActionPreference, then checks the real
+# exit code to decide whether to throw.
+function Invoke-Azd {
+    $savedEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & azd @args 2>&1
+        $exitCode = $LASTEXITCODE
+        # Emit stdout lines (filtering out stderr records)
+        foreach ($line in $output) {
+            if ($line -is [System.Management.Automation.ErrorRecord]) { continue }
+            Write-Output $line
+        }
+        if ($exitCode -ne 0) {
+            $stderrLines = @($output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+            $errMsg = if ($stderrLines.Count -gt 0) { ($stderrLines | ForEach-Object { $_.ToString() }) -join "`n" } else { "exit code $exitCode" }
+            throw "azd $($args -join ' ') failed: $errMsg"
+        }
+    } finally {
+        $ErrorActionPreference = $savedEAP
+    }
+}
 
 # -- Helper functions for coloured output --
 function Write-Step  { param([string]$msg) Write-Host "`n>> $msg" -ForegroundColor Cyan }
@@ -179,7 +202,7 @@ function Build-And-PushOtelCollector {
     }
     Write-Ok "Collector image pushed to ACR"
 
-    azd env set OTEL_COLLECTOR_IMAGE $collectorImage --no-prompt 2>$null
+    Invoke-Azd env set OTEL_COLLECTOR_IMAGE $collectorImage --no-prompt | Out-Null
     return $collectorImage
 }
 
@@ -283,10 +306,7 @@ if ($envVars.ContainsKey("AZURE_ENV_NAME") -and -not [string]::IsNullOrEmpty($en
     $azdDeployKeys = @("AZURE_SUBSCRIPTION_ID", "AZURE_LOCATION", "AZURE_RESOURCE_GROUP")
     foreach ($key in $azdDeployKeys) {
         if ($envVars.ContainsKey($key) -and -not [string]::IsNullOrEmpty($envVars[$key])) {
-            $prevEAP = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            azd env set $key $envVars[$key] --no-prompt 2>&1 | Out-Null
-            $ErrorActionPreference = $prevEAP
+            Invoke-Azd env set $key $envVars[$key] --no-prompt | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "   [FAIL] Could not set $key in azd environment" -ForegroundColor Red
                 exit 1
@@ -308,10 +328,7 @@ if ($envVars.ContainsKey("AZURE_ENV_NAME") -and -not [string]::IsNullOrEmpty($en
     $azdDeployKeys = @("AZURE_SUBSCRIPTION_ID", "AZURE_LOCATION", "AZURE_RESOURCE_GROUP")
     foreach ($key in $azdDeployKeys) {
         if ($envVars.ContainsKey($key) -and -not [string]::IsNullOrEmpty($envVars[$key])) {
-            $prevEAP = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            azd env set $key $envVars[$key] --no-prompt 2>&1 | Out-Null
-            $ErrorActionPreference = $prevEAP
+            Invoke-Azd env set $key $envVars[$key] --no-prompt | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "   [FAIL] Could not set $key in azd environment" -ForegroundColor Red
                 exit 1
@@ -390,7 +407,7 @@ foreach ($key in $syncKeys) {
         } else {
             $displayValue = $envVars[$key]
         }
-        azd env set $key $envVars[$key] --no-prompt 2>$null
+        Invoke-Azd env set $key $envVars[$key] --no-prompt | Out-Null
         Write-Ok "$key = $displayValue"
     } else {
         # Explicitly clear stale values by editing the azd env file directly.
@@ -407,7 +424,7 @@ foreach ($key in $syncKeys) {
 }
 
 # -- 5b. Set optional infrastructure flags --
-azd env set LIFECYCLE_POLICY_MODE $LifecyclePolicy --no-prompt 2>$null
+Invoke-Azd env set LIFECYCLE_POLICY_MODE $LifecyclePolicy --no-prompt | Out-Null
 switch ($LifecyclePolicy) {
     "none"    { Write-Skip "Lifecycle policy: none (all blobs stay Hot)" }
     "one-way" { Write-Ok   "Lifecycle policy: one-way (Cold after 15d, Archive after 90d)" }
@@ -415,7 +432,7 @@ switch ($LifecyclePolicy) {
 }
 
 # -- 5c. Set log retention --
-azd env set LOG_RETENTION_DAYS $LogRetentionDays.ToString() --no-prompt 2>$null
+Invoke-Azd env set LOG_RETENTION_DAYS $LogRetentionDays.ToString() --no-prompt | Out-Null
 if ($LogRetentionDays -ne 30) {
     Write-Ok "Log retention: $LogRetentionDays days"
 } else {
@@ -452,7 +469,7 @@ if ($resolvedEnableOtel) {
         exit 1
     }
 
-    azd env set ENABLE_OTEL 'true' --no-prompt 2>$null
+    Invoke-Azd env set ENABLE_OTEL 'true' --no-prompt | Out-Null
 
     # Check whether ACR endpoint already exists (re-deployment / previous provision)
     # NOTE: azd env get-value writes errors to stdout (not stderr), so
@@ -480,7 +497,7 @@ if ($resolvedEnableOtel) {
     # key entirely, leave the existing azd env value untouched so a previous
     # -EnableOTel deployment is not silently reverted on code-only redeploys.
     if ($envVars.ContainsKey("ENABLE_OTEL")) {
-        azd env set ENABLE_OTEL 'false' --no-prompt 2>$null
+        Invoke-Azd env set ENABLE_OTEL 'false' --no-prompt | Out-Null
         Write-Skip "OTel monitoring: disabled (ENABLE_OTEL=$($envVars['ENABLE_OTEL']) in .env)"
     } else {
         Write-Skip "OTel monitoring: unchanged (not set in .env or switch)"
@@ -494,7 +511,7 @@ $otelTelemetryLevel = if ($envVars.ContainsKey("OTEL_TELEMETRY_LEVEL") -and -not
 } else {
     'detailed'
 }
-azd env set OTEL_TELEMETRY_LEVEL $otelTelemetryLevel --no-prompt 2>$null
+Invoke-Azd env set OTEL_TELEMETRY_LEVEL $otelTelemetryLevel --no-prompt | Out-Null
 Write-Ok "OTel telemetry level: $otelTelemetryLevel"
 
 $otelLogMinSeverity = if ($envVars.ContainsKey("OTEL_LOG_MIN_SEVERITY") -and -not [string]::IsNullOrEmpty($envVars["OTEL_LOG_MIN_SEVERITY"])) {
@@ -502,7 +519,7 @@ $otelLogMinSeverity = if ($envVars.ContainsKey("OTEL_LOG_MIN_SEVERITY") -and -no
 } else {
     '9'
 }
-azd env set OTEL_LOG_MIN_SEVERITY $otelLogMinSeverity --no-prompt 2>$null
+Invoke-Azd env set OTEL_LOG_MIN_SEVERITY $otelLogMinSeverity --no-prompt | Out-Null
 Write-Ok "OTel log min severity: $otelLogMinSeverity"
 
 $otelScrubPii = if ($envVars.ContainsKey("OTEL_SCRUB_PII") -and -not [string]::IsNullOrEmpty($envVars["OTEL_SCRUB_PII"])) {
@@ -510,7 +527,7 @@ $otelScrubPii = if ($envVars.ContainsKey("OTEL_SCRUB_PII") -and -not [string]::I
 } else {
     'true'
 }
-azd env set OTEL_SCRUB_PII $otelScrubPii --no-prompt 2>$null
+Invoke-Azd env set OTEL_SCRUB_PII $otelScrubPii --no-prompt | Out-Null
 Write-Ok "OTel PII scrubbing: $otelScrubPii"
 
 # -- 6. Show summary before deploying --
@@ -557,6 +574,12 @@ if ($confirm -notin @('y', 'Y', 'yes', 'Yes')) {
 }
 
 # -- 8. Deploy --
+# Temporarily relax ErrorActionPreference for long-running azd commands.
+# azd writes update-available notices and progress info to stderr, which
+# PS5.1's ErrorActionPreference=Stop promotes to terminating errors.
+$savedEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+
 if ($SkipProvision) {
     Write-Step "Running azd deploy (code only, no infrastructure changes)"
     azd deploy
@@ -575,6 +598,11 @@ if ($SkipProvision) {
         Write-Host "====================================================" -ForegroundColor Red
         Write-Host "  Provisioning failed! Check the output above." -ForegroundColor Red
         Write-Host "====================================================" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Common fixes:" -ForegroundColor Yellow
+        Write-Host "    - Expired token: azd auth login" -ForegroundColor Yellow
+        Write-Host "    - Claims challenge: az login --scope https://management.azure.com/.default" -ForegroundColor Yellow
+        Write-Host "    - Subscription mismatch: az account set --subscription <id>" -ForegroundColor Yellow
         exit 1
     }
     Write-Ok "Infrastructure provisioned successfully"
@@ -595,6 +623,11 @@ if ($SkipProvision) {
         Write-Host "====================================================" -ForegroundColor Red
         Write-Host "  Re-provisioning with OTel sidecar failed!" -ForegroundColor Red
         Write-Host "====================================================" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Common fixes:" -ForegroundColor Yellow
+        Write-Host "    - Expired token: azd auth login" -ForegroundColor Yellow
+        Write-Host "    - Claims challenge: az login --scope https://management.azure.com/.default" -ForegroundColor Yellow
+        Write-Host "    - Subscription mismatch: az account set --subscription <id>" -ForegroundColor Yellow
         exit 1
     }
     Write-Ok "Container App updated with OTel sidecar"
@@ -606,6 +639,8 @@ if ($SkipProvision) {
     azd up
 }
 
+$ErrorActionPreference = $savedEAP
+
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
     Write-Host "====================================================" -ForegroundColor Green
@@ -614,7 +649,7 @@ if ($LASTEXITCODE -eq 0) {
 
     # Show the MCP endpoint
     Write-Step "Retrieving deployment outputs"
-    $mcpEndpoint = azd env get-value mcpEndpoint 2>$null
+    $mcpEndpoint = Invoke-Azd env get-value mcpEndpoint 2>$null
     if ($mcpEndpoint) {
         Write-Host ""
         Write-Host "  MCP Endpoint: $mcpEndpoint" -ForegroundColor Yellow
@@ -622,12 +657,12 @@ if ($LASTEXITCODE -eq 0) {
 
     # Show App Insights connection string when OTel is enabled
     if ($resolvedEnableOtel) {
-        $appiConnStr = azd env get-value appInsightsConnectionString 2>$null
+        $appiConnStr = Invoke-Azd env get-value appInsightsConnectionString 2>$null
         if ($appiConnStr) {
             $truncLen = [Math]::Min(40, $appiConnStr.Length)
             Write-Host "  App Insights: $($appiConnStr.Substring(0, $truncLen))..." -ForegroundColor Yellow
         }
-        $appiName = azd env get-value appInsightsName 2>$null
+        $appiName = Invoke-Azd env get-value appInsightsName 2>$null
         if ($appiName) {
             Write-Host "  App Insights Resource: $appiName" -ForegroundColor Yellow
         }
@@ -637,5 +672,11 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "====================================================" -ForegroundColor Red
     Write-Host "  Deployment failed! Check the output above for errors." -ForegroundColor Red
     Write-Host "====================================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Common fixes:" -ForegroundColor Yellow
+    Write-Host "    - Expired token: azd auth login" -ForegroundColor Yellow
+    Write-Host "    - Claims challenge: az login --scope https://management.azure.com/.default" -ForegroundColor Yellow
+    Write-Host "    - Subscription mismatch: az account set --subscription <id>" -ForegroundColor Yellow
+    Write-Host "    - Code-only retry: .\deploy_to_azure.ps1 -SkipProvision" -ForegroundColor Yellow
     exit 1
 }

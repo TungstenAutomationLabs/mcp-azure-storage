@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Encryption at rest** -- added explicit SSE (Storage Service Encryption) block to storage account in `infra/main.bicep` covering blob, file, queue, and table services with Microsoft-managed keys
 - **BYOSA HTTPS validation** -- `src/config.ts` now logs a `[SECURITY WARNING]` when custom service URLs use plain HTTP (excludes localhost for Azurite compatibility)
 
+### Changed
+- **OTel Collector architecture** -- moved from sidecar container to a separate Container App with internal-only ingress and Container Apps-managed TLS (`allowInsecure: false`). The MCP server now sends telemetry to the collector's HTTPS FQDN instead of `http://localhost:4318`, achieving end-to-end encryption in transit as mandated by security policy.
+
 ### Added
 - **PII scrubbing for OTel telemetry** -- new 3-layer defence-in-depth to prevent sensitive file names leaking into traces:
   1. **Application layer** (`src/utils/pii-scrubber.ts`) -- SHA-256 hashed segments for blob names, container names, and URLs; preserves directory structure and file extensions; controlled by `OTEL_SCRUB_PII` env var (default: `true`)

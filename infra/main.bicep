@@ -633,13 +633,116 @@ var mcpServerEnv = [
   }
 ]
 
+// -- OTel Collector as separate Container App (HTTPS internal ingress) ----------
+// The collector runs as its own Container App with internal-only ingress and
+// Container Apps-managed TLS. The MCP server sends telemetry over HTTPS to the
+// collector's FQDN -- no plain HTTP between containers, even within the same
+// Container Apps environment. This satisfies end-to-end encryption in transit.
+var includeOtelCollector = enableOtel && !empty(otelCollectorImage)
+
+resource otelCollectorApp 'Microsoft.App/containerApps@2024-03-01' = if (includeOtelCollector) {
+  name: '${envName}-otel'
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${managedIdentity.id}': {}
+    }
+  }
+  dependsOn: [
+    acrPullRoleAssignment
+  ]
+  properties: {
+    managedEnvironmentId: containerAppEnv.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      ingress: {
+        external: false          // Internal only -- not reachable from outside the environment
+        targetPort: 4318         // Collector OTLP/HTTP receiver port
+        transport: 'http'        // Backend protocol (collector speaks HTTP); Container Apps terminates TLS
+        allowInsecure: false     // Force HTTPS -- the critical security requirement
+      }
+      registries: [
+        {
+          server: containerRegistry.properties.loginServer
+          identity: managedIdentity.id
+        }
+      ]
+      secrets: enableOtel ? [
+        {
+          name: 'appinsights-connection-string'
+          value: appInsights.properties.ConnectionString
+        }
+      ] : []
+    }
+    template: {
+      containers: [
+        {
+          name: 'otel-collector'
+          image: otelCollectorImage
+          resources: {
+            cpu: json('0.25')
+            memory: '0.5Gi'
+          }
+          env: [
+            {
+              name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+              secretRef: 'appinsights-connection-string'
+            }
+            {
+              // Collector log severity: WARN=13, INFO=9, DEBUG=5.
+              name: 'OTEL_LOG_MIN_SEVERITY'
+              value: otelLogMinSeverity
+            }
+            {
+              name: 'OTEL_DEPLOYMENT_ENV'
+              value: 'production'
+            }
+          ]
+          probes: [
+            {
+              type: 'Liveness'
+              tcpSocket: {
+                port: 4318
+              }
+              initialDelaySeconds: 10
+              timeoutSeconds: 5
+              periodSeconds: 30
+              failureThreshold: 5
+            }
+            {
+              type: 'Readiness'
+              tcpSocket: {
+                port: 4318
+              }
+              initialDelaySeconds: 5
+              timeoutSeconds: 5
+              periodSeconds: 15
+              failureThreshold: 10
+            }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 1
+      }
+    }
+  }
+}
+
+// The collector's HTTPS endpoint (internal FQDN with Container Apps-managed TLS).
+// Only valid when the collector Container App exists.
+var otelCollectorEndpoint = includeOtelCollector ? 'https://${otelCollectorApp.properties.configuration.ingress.fqdn}' : ''
+
 // -- OTel instrumentation env vars (only meaningful when monitoring is enabled) --
 // When enableOtel is false, OTEL_EXPORTER_OTLP_ENDPOINT is empty which causes
 // the instrumentation.cjs activation guard to exit immediately -- zero overhead.
+// In production, the endpoint uses HTTPS to the separate collector Container App.
 var otelInstrumentationEnv = [
   {
     name: 'OTEL_EXPORTER_OTLP_ENDPOINT'
-    value: enableOtel ? 'http://localhost:4318' : ''
+    value: otelCollectorEndpoint
   }
   {
     name: 'OTEL_SERVICE_NAME'
@@ -674,45 +777,12 @@ var mcpContainer = {
   env: concat(mcpServerEnv, otelInstrumentationEnv)
 }
 
-// -- OTel Collector sidecar container (only when enableOtel is true) ------------
-// Runs the custom collector image (built from otel/Dockerfile) which includes
-// the azure_monitor exporter. Receives telemetry from the MCP server on
-// localhost:4318 (OTLP/HTTP) and forwards it to Application Insights.
-var otelCollectorContainer = {
-  name: 'otel-collector'
-  image: otelCollectorImage
-  resources: {
-    cpu: json('0.25')
-    memory: '0.5Gi'
-  }
-  env: [
-    {
-      name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-      secretRef: 'appinsights-connection-string'
-    }
-    {
-      // Collector log severity: WARN=13, INFO=9, DEBUG=5.
-      // Configurable via otelLogMinSeverity parameter.
-      name: 'OTEL_LOG_MIN_SEVERITY'
-      value: otelLogMinSeverity
-    }
-    {
-      name: 'OTEL_DEPLOYMENT_ENV'
-      value: 'production'
-    }
-  ]
-}
+// MCP server Container App has a single container (no sidecar).
+var containers = [mcpContainer]
 
-// Conditional containers array -- includes the sidecar only when OTel is enabled
-// AND a collector image has been provided. On first-time deploys the ACR does not
-// exist yet during `azd provision`, so otelCollectorImage is empty. Including a
-// container with an empty image causes Azure to reject the deployment with
-// ContainerAppImageRequired. The deploy script runs a second `azd provision`
-// after building and pushing the collector image, which populates the parameter.
-var includeOtelSidecar = enableOtel && !empty(otelCollectorImage)
-var containers = includeOtelSidecar ? [mcpContainer, otelCollectorContainer] : [mcpContainer]
-
-// -- Secrets array (conditional App Insights connection string) -----------------
+// -- Secrets array for MCP server Container App --------------------------------
+// The App Insights connection string is no longer needed here -- the OTel
+// Collector runs as a separate Container App with its own secrets.
 var baseSecrets = [
   {
     name: 'mcp-api-key'
@@ -724,14 +794,9 @@ var baseSecrets = [
   }
 ]
 
-var otelSecrets = enableOtel ? [
-  {
-    name: 'appinsights-connection-string'
-    value: appInsights.properties.ConnectionString
-  }
-] : []
-
-var allSecrets = concat(baseSecrets, otelSecrets)
+// The MCP server no longer needs the App Insights connection string as a secret.
+// The OTel Collector runs as a separate Container App with its own secrets.
+var allSecrets = baseSecrets
 
 // -- Container App -------------------------------------------------------------
 // The main application resource. Runs the MCP server Docker image as a
