@@ -371,33 +371,35 @@ describe("DISABLED_TOOLS gating", () => {
   });
 
   describe("KNOWN_TOOL_NAMES static set (Finding 4)", () => {
+    // Import from the lightweight metrics module (no side effects) instead of
+    // server.ts, which starts an HTTP listener at module scope and causes
+    // timeouts in tests.
     it("contains all known tool names and no false positives for valid names", async () => {
-      // Import the static set from server.ts (avoids SDK internals)
-      const { KNOWN_TOOL_NAMES } = await import("../../src/server.js");
+      const { KNOWN_TOOLS } = await import("../../src/utils/metrics.js");
 
       // Verify it contains a representative sample of known tool names
-      expect(KNOWN_TOOL_NAMES.has("blob-list")).toBe(true);
-      expect(KNOWN_TOOL_NAMES.has("blob-create")).toBe(true);
-      expect(KNOWN_TOOL_NAMES.has("blob-delete")).toBe(true);
-      expect(KNOWN_TOOL_NAMES.has("table-create")).toBe(true);
-      expect(KNOWN_TOOL_NAMES.has("queue-create")).toBe(true);
-      expect(KNOWN_TOOL_NAMES.has("fileshare-list-shares")).toBe(true);
-      expect(KNOWN_TOOL_NAMES.has("util-to-base64")).toBe(true);
-      expect(KNOWN_TOOL_NAMES.has("store-info")).toBe(true);
+      expect(KNOWN_TOOLS.has("blob-list")).toBe(true);
+      expect(KNOWN_TOOLS.has("blob-create")).toBe(true);
+      expect(KNOWN_TOOLS.has("blob-delete")).toBe(true);
+      expect(KNOWN_TOOLS.has("table-create")).toBe(true);
+      expect(KNOWN_TOOLS.has("queue-create")).toBe(true);
+      expect(KNOWN_TOOLS.has("fileshare-list-shares")).toBe(true);
+      expect(KNOWN_TOOLS.has("util-to-base64")).toBe(true);
+      expect(KNOWN_TOOLS.has("store-info")).toBe(true);
 
       // Verify unknown names are NOT in the set (no false positives)
-      expect(KNOWN_TOOL_NAMES.has("totally-fake-tool")).toBe(false);
-      expect(KNOWN_TOOL_NAMES.has("nonexistent-tool")).toBe(false);
+      expect(KNOWN_TOOLS.has("totally-fake-tool")).toBe(false);
+      expect(KNOWN_TOOLS.has("nonexistent-tool")).toBe(false);
     });
 
     it("does not warn for valid tool names in DISABLED_TOOLS", async () => {
-      const { KNOWN_TOOL_NAMES } = await import("../../src/server.js");
+      const { KNOWN_TOOLS } = await import("../../src/utils/metrics.js");
 
       // Simulate what validateDisabledToolNames does
       const disabled = parseDisabledTools("blob-delete,queue-delete");
       const unknowns: string[] = [];
       for (const name of disabled) {
-        if (!KNOWN_TOOL_NAMES.has(name)) {
+        if (!KNOWN_TOOLS.has(name)) {
           unknowns.push(name);
         }
       }
@@ -407,12 +409,12 @@ describe("DISABLED_TOOLS gating", () => {
     });
 
     it("correctly identifies unknown tool names in DISABLED_TOOLS", async () => {
-      const { KNOWN_TOOL_NAMES } = await import("../../src/server.js");
+      const { KNOWN_TOOLS } = await import("../../src/utils/metrics.js");
 
       const disabled = parseDisabledTools("blob-delete,totally-fake-tool,another-fake");
       const unknowns: string[] = [];
       for (const name of disabled) {
-        if (!KNOWN_TOOL_NAMES.has(name)) {
+        if (!KNOWN_TOOLS.has(name)) {
           unknowns.push(name);
         }
       }
