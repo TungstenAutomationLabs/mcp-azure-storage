@@ -7,7 +7,7 @@
  *  2. `Authorization: Bearer <key>` header (common alternative)
  *
  * Security properties:
- *  - **Fail-closed** — if MCP_API_KEY is not configured, ALL requests are rejected (HTTP 503).
+ *  - **Fail-closed** -- if MCP_API_KEY is not configured, ALL requests are rejected (HTTP 503).
  *  - **Constant-time comparison** — uses `crypto.timingSafeEqual` to prevent timing attacks.
  *  - **No query-param auth** — keys are only accepted via headers, not URLs (which leak to logs).
  *
@@ -16,6 +16,7 @@
 
 import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
+import { debug, warn, error } from "../utils/otel-logger.js";
 
 /**
  * Express middleware that validates the API key on every request.
@@ -27,31 +28,31 @@ export function apiKeyAuth(req: Request, res: Response, next: NextFunction): voi
   // Fail closed: if no API key is configured at all, reject every request.
   // This prevents accidental unauthenticated access if the env var is missing.
   if (!apiKey) {
-    console.error("[auth] FATAL — MCP_API_KEY not set. All requests blocked.");
+    error("MCP_API_KEY not set -- all requests blocked", { component: "auth" });
     res.status(503).json({
       jsonrpc: "2.0",
       error: {
         code: -32001,
-        message: "Server misconfigured — authentication not available.",
+        message: "Server misconfigured -- authentication not available.",
       },
     });
     return;
   }
 
   // Extract the client-provided key from headers (two supported formats).
-  // Query-param auth is intentionally NOT supported — URLs appear in logs.
+  // Query-param auth is intentionally NOT supported -- URLs appear in logs.
   const providedKey =
     (req.headers["x-api-key"] as string | undefined) ||
     extractBearerToken(req.headers.authorization);
 
-  console.log(
-    `[auth] ${req.method} ${req.path} — ` +
-      `x-api-key: ${req.headers["x-api-key"] ? "present" : "missing"}, ` +
-      `authorization: ${req.headers.authorization ? "present" : "missing"}`
-  );
+  debug(`${req.method} ${req.path}`, {
+    component: "auth",
+    xApiKey: req.headers["x-api-key"] ? "present" : "missing",
+    authorization: req.headers.authorization ? "present" : "missing",
+  });
 
   if (!providedKey) {
-    console.warn(`[auth] REJECTED — no API key found in request`);
+    warn("Rejected -- no API key found in request", { component: "auth" });
     res.status(401).json({
       jsonrpc: "2.0",
       error: {
@@ -65,7 +66,7 @@ export function apiKeyAuth(req: Request, res: Response, next: NextFunction): voi
   // Constant-time comparison prevents an attacker from measuring response
   // times to determine how many characters of the key are correct.
   if (!timingSafeEqual(apiKey, providedKey)) {
-    console.warn(`[auth] REJECTED — invalid API key`);
+    warn("Rejected -- invalid API key", { component: "auth" });
     res.status(403).json({
       jsonrpc: "2.0",
       error: {

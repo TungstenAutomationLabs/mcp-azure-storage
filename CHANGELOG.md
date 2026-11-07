@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] -- 2026-11-06
+
+### Breaking
+
+- **Stateless Streamable HTTP transport** -- sessions removed entirely. Every request creates a fresh `McpServer` + `StreamableHTTPServerTransport` with no session state surviving across requests or replicas. This eliminates "session not found" 404 errors when Azure Container Apps scales to multiple replicas. Clients that relied on `Mcp-Session-Id` for server-side state must switch to self-contained requests. Stale session headers are ignored gracefully (logged + counted, but no 404).
+- **GET /mcp** now returns 405 (SSE streams are not supported in stateless mode).
+- **DELETE /mcp** now returns 405 (no sessions to terminate).
+
+### Changed
+
+- **Auth middleware logging** -- replaced raw `console.log` in `src/middleware/api-key.ts` with OTel `debug()` / `warn()` / `error()` loggers. Request logs now emit structured attributes (`component: "auth"`, `xApiKey: "present"/"missing"`) via `src/utils/otel-logger.js`. No API key values or tokens appear in any log output.
+
+### Added
+
+- **OTel metrics** (`src/utils/metrics.ts`) -- four new counters:
+  - `mcp.requests.total` -- request count by JSON-RPC method and tool name
+  - `mcp.requests.errors` -- error count by method
+  - `mcp.stale_sessions.received` -- requests carrying a stale `Mcp-Session-Id` header
+  - `mcp.server.starts` -- server process start events
+- **Tool-name sanitisation** -- `sanitiseToolName()` validates tool names against the `KNOWN_TOOLS` set before recording as metric labels; unknown values are replaced with `"unknown"` to prevent high-cardinality label explosions.
+- **Replica name resource attribute** -- `CONTAINER_APP_REPLICA_NAME` (or `"local"`) is set as the `container_app.replica.name` OTel resource attribute in `src/instrumentation.cjs`, enabling per-replica dashboards.
+- **Stale session logging** -- when a client sends an `Mcp-Session-Id` header in stateless mode, the first 8 characters of the session ID and the replica name are logged at `warn` level.
+- **Tests** -- `tests/stateless-transport.test.ts` (12 tests), `tests/middleware/api-key.test.ts` (12 tests), `tests/utils/metrics.test.ts` (20 tests) covering stateless transport, auth logging, and metrics utilities.
+
 ## [1.2.4] -- 2026-10-27
 
 ### Security

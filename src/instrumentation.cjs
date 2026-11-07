@@ -19,14 +19,14 @@
 
 'use strict';
 
-// ── Activation guard ─────────────────────────────────────────────────────────
+// -- Activation guard ---------------------------------------------------------
 
 if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
   // No endpoint configured -- exit with zero overhead.
   return;
 }
 
-// ── Telemetry level ──────────────────────────────────────────────────────────
+// -- Telemetry level ----------------------------------------------------------
 
 const level = (process.env.OTEL_TELEMETRY_LEVEL || 'basic').toLowerCase();
 
@@ -35,7 +35,7 @@ if (level === 'off') {
   return;
 }
 
-// ── Level presets ────────────────────────────────────────────────────────────
+// -- Level presets -------------------------------------------------------------
 
 const LEVEL_PRESETS = {
   basic: {
@@ -65,13 +65,13 @@ const metricsIntervalMs = parseInt(
 );
 const logMinSeverity = process.env.OTEL_LOG_MIN_SEVERITY || preset.logMinSeverity;
 
-// ── Required for Azure Monitor ───────────────────────────────────────────────
+// -- Required for Azure Monitor -----------------------------------------------
 
 if (!process.env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE) {
   process.env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE = 'delta';
 }
 
-// ── Imports ──────────────────────────────────────────────────────────────────
+// -- Imports ------------------------------------------------------------------
 
 const { NodeSDK } = require('@opentelemetry/sdk-node');
 const { resourceFromAttributes } = require('@opentelemetry/resources');
@@ -140,7 +140,7 @@ function scrubStorageUrl(url) {
   return url;
 }
 
-// ── Severity number mapping for log filtering ────────────────────────────────
+// -- Severity number mapping for log filtering --------------------------------
 
 const SEVERITY_MAP = {
   DEBUG: 5,
@@ -151,7 +151,7 @@ const SEVERITY_MAP = {
 
 const minSeverityNumber = logMinSeverity ? (SEVERITY_MAP[logMinSeverity.toUpperCase()] || 0) : 0;
 
-// ── Exporters ────────────────────────────────────────────────────────────────
+// -- Exporters ----------------------------------------------------------------
 
 const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
 
@@ -159,19 +159,19 @@ const traceExporter = new OTLPTraceExporter({ url: endpoint + '/v1/traces' });
 const metricExporter = new OTLPMetricExporter({ url: endpoint + '/v1/metrics' });
 const logExporter = new OTLPLogExporter({ url: endpoint + '/v1/logs' });
 
-// ── Metric reader ────────────────────────────────────────────────────────────
+// -- Metric reader ------------------------------------------------------------
 
 const metricReader = new PeriodicExportingMetricReader({
   exporter: metricExporter,
   exportIntervalMillis: metricsIntervalMs,
 });
 
-// ── Log processor ────────────────────────────────────────────────────────────
+// -- Log processor ------------------------------------------------------------
 // CRITICAL: BatchLogRecordProcessor takes an OPTIONS OBJECT, not positional args.
 
 const logRecordProcessor = new BatchLogRecordProcessor({ exporter: logExporter });
 
-// ── Auto-instrumentations ────────────────────────────────────────────────────
+// -- Auto-instrumentations ----------------------------------------------------
 
 const instrumentations = getNodeAutoInstrumentations({
   // fs instrumentation is too noisy -- disable it.
@@ -211,7 +211,7 @@ const instrumentations = getNodeAutoInstrumentations({
   },
 });
 
-// ── Sampler configuration ────────────────────────────────────────────────────
+// -- Sampler configuration ----------------------------------------------------
 // Set via OTel standard env vars so the SDK picks them up automatically.
 
 if (level === 'full') {
@@ -229,15 +229,17 @@ if (level === 'full') {
   }
 }
 
-// ── Resource ─────────────────────────────────────────────────────────────────
+// -- Resource -----------------------------------------------------------------
 
 const serviceName = process.env.OTEL_SERVICE_NAME || 'mcp-azure-storage';
+const replicaName = process.env.CONTAINER_APP_REPLICA_NAME || 'local';
 
 const resource = resourceFromAttributes({
   [ATTR_SERVICE_NAME]: serviceName,
+  'container_app.replica.name': replicaName,
 });
 
-// ── SDK initialisation ───────────────────────────────────────────────────────
+// -- SDK initialisation -------------------------------------------------------
 
 const sdk = new NodeSDK({
   resource: resource,
@@ -249,7 +251,7 @@ const sdk = new NodeSDK({
 
 sdk.start();
 
-// ── Graceful shutdown ────────────────────────────────────────────────────────
+// -- Graceful shutdown --------------------------------------------------------
 
 process.on('SIGTERM', function () {
   sdk

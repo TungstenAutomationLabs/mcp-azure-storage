@@ -2,16 +2,33 @@
  * Unit tests for src/middleware/api-key.ts
  *
  * Tests API key authentication middleware behaviour without any Azure dependencies.
+ * Verifies that request logging uses the OTel logger (not raw console.log) and
+ * that no actual key values or tokens are leaked in log output.
  */
 
 import express from "express";
 import request from "supertest";
+
+// Mock the OTel logger module so we can inspect calls without side-effects.
+const mockDebug = vi.fn();
+const mockWarn = vi.fn();
+const mockError = vi.fn();
+
+vi.mock("../../src/utils/otel-logger.js", () => ({
+  debug: mockDebug,
+  warn: mockWarn,
+  error: mockError,
+  info: vi.fn(),
+}));
 
 describe("apiKeyAuth middleware", () => {
   let originalApiKey: string | undefined;
 
   beforeEach(() => {
     originalApiKey = process.env.MCP_API_KEY;
+    mockDebug.mockClear();
+    mockWarn.mockClear();
+    mockError.mockClear();
   });
 
   afterEach(() => {
@@ -119,7 +136,7 @@ describe("apiKeyAuth middleware", () => {
     process.env.MCP_API_KEY = "correct-key";
     const app = await createApp();
 
-    // X-API-Key is correct, Authorization is wrong — should pass
+    // X-API-Key is correct, Authorization is wrong -- should pass
     const res = await request(app)
       .post("/mcp")
       .set("X-API-Key", "correct-key")
@@ -128,5 +145,116 @@ describe("apiKeyAuth middleware", () => {
       .expect(200);
 
     expect(res.body.ok).toBe(true);
+  });
+
+  describe("OTel debug logging", () => {
+    it("emits request log via OTel debug(), not raw console.log", async () => {
+      process.env.MCP_API_KEY = "correct-key";
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const app = await createApp();
+
+      await request(app)
+        .post("/mcp")
+        .set("X-API-Key", "correct-key")
+        .send({ test: true })
+        .expect(200);
+
+      // The OTel debug function should have been called
+      expect(mockDebug).toHaveBeenCalledTimes(1);
+      expect(mockDebug).toHaveBeenCalledWith(
+        expect.stringContaining("POST"),
+        expect.objectContaining({
+          component: "auth",
+          xApiKey: "present",
+          authorization: "missing",
+        }),
+      );
+
+      // Raw console.log should NOT have been called directly by the middleware
+      // (the mock replaces the otel-logger module, so no console.log pass-through)
+      expect(consoleSpy).not.toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+
+    it("logs only 'present'/'missing' indicators, never actual key values", async () => {
+      const secretKey = "super-secret-key-12345";
+      const secretBearer = "Bearer top-secret-token-67890";
+      process.env.MCP_API_KEY = secretKey;
+      const app = await createApp();
+
+      await request(app)
+        .post("/mcp")
+        .set("X-API-Key", secretKey)
+        .set("Authorization", secretBearer)
+        .send({ test: true })
+        .expect(200);
+
+      // Inspect every argument passed to debug()
+      const debugArgs = JSON.stringify(mockDebug.mock.calls);
+      expect(debugArgs).not.toContain(secretKey);
+      expect(debugArgs).not.toContain("top-secret-token-67890");
+
+      // The attributes should contain only safe indicator values
+      const attrs = mockDebug.mock.calls[0][1];
+      expect(attrs.xApiKey).toBe("present");
+      expect(attrs.authorization).toBe("present");
+    });
+
+    it("emits warn() when request has no API key", async () => {
+      process.env.MCP_API_KEY = "test-key";
+      const app = await createApp();
+
+      await request(app)
+        .post("/mcp")
+        .send({ test: true })
+        .expect(401);
+
+      // debug() called for the request log, warn() for the rejection
+      expect(mockDebug).toHaveBeenCalledTimes(1);
+      expect(mockWarn).toHaveBeenCalledTimes(1);
+      expect(mockWarn).toHaveBeenCalledWith(
+        expect.stringContaining("no API key"),
+        expect.objectContaining({ component: "auth" }),
+      );
+    });
+
+    it("emits warn() when API key is invalid", async () => {
+      process.env.MCP_API_KEY = "correct-key";
+      const app = await createApp();
+
+      await request(app)
+        .post("/mcp")
+        .set("X-API-Key", "wrong-key")
+        .send({ test: true })
+        .expect(403);
+
+      expect(mockWarn).toHaveBeenCalledTimes(1);
+      expect(mockWarn).toHaveBeenCalledWith(
+        expect.stringContaining("invalid API key"),
+        expect.objectContaining({ component: "auth" }),
+      );
+
+      // Ensure the actual key values are not in the warn() output
+      const warnArgs = JSON.stringify(mockWarn.mock.calls);
+      expect(warnArgs).not.toContain("correct-key");
+      expect(warnArgs).not.toContain("wrong-key");
+    });
+
+    it("emits error() when MCP_API_KEY env var is not set", async () => {
+      delete process.env.MCP_API_KEY;
+      const app = await createApp();
+
+      await request(app)
+        .post("/mcp")
+        .send({ test: true })
+        .expect(503);
+
+      expect(mockError).toHaveBeenCalledTimes(1);
+      expect(mockError).toHaveBeenCalledWith(
+        expect.stringContaining("MCP_API_KEY not set"),
+        expect.objectContaining({ component: "auth" }),
+      );
+    });
   });
 });
