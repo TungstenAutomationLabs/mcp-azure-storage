@@ -14,11 +14,13 @@
  *   detailed -- 100% trace sampling, 15s metrics, INFO+ logs
  *   full     -- always_on sampler, 5s metrics, no log filter
  *
- * PII scrubbing (v1.4.0+):
- *   Outbound HTTP spans to Azure Storage have their URL attributes
- *   scrubbed to keep only scheme + host + resource name (container,
- *   queue, table, or share). Blob paths, file paths, entity keys,
- *   message IDs, and query strings are removed entirely.
+ * PII scrubbing (v1.4.0+, enhanced v1.4.1):
+ *   Outbound HTTP and undici (fetch) spans have their URL attributes
+ *   scrubbed. For Azure Storage endpoints (including Azurite via
+ *   localhost, Docker service names, or custom domains from
+ *   AZURE_*_SERVICE_URL): keep scheme + host + resource name only.
+ *   For any other host: keep scheme + host only.
+ *   Query strings are always removed.
  *
  *   When OTEL_SCRUB_HMAC_KEY is set, resource names are HMAC'd with
  *   that key for correlation without revealing names to the backend.
@@ -94,10 +96,13 @@ var getNodeAutoInstrumentations = require('@opentelemetry/auto-instrumentations-
 var sessionAttributes = require('./session-attributes.cjs').sessionAttributes;
 var crypto = require('crypto');
 
-// -- PII scrubbing for outbound HTTP spans ------------------------------------
+// -- PII scrubbing for outbound HTTP and undici (fetch) spans -----------------
 // Removes blob paths, file paths, entity keys, message IDs, and query strings
 // from Azure Storage URLs in span attributes. Keeps only scheme + host +
 // resource name (container/queue/table/share).
+//
+// For non-storage URLs (e.g. source URLs passed to blob-upload-from-url),
+// only scheme + host is kept -- path, query, and fragment are removed.
 //
 // Controlled by OTEL_SCRUB_PII env var (default: true).
 // When OTEL_SCRUB_HMAC_KEY is set, resource names are HMAC'd.
@@ -136,7 +141,8 @@ function identifyService(hostname) {
 }
 
 /**
- * Check whether hostname is an Azurite emulator.
+ * Check whether hostname is a standard Azurite emulator address.
+ * Covers localhost, 127.x.x.x, and [::1].
  */
 function isAzuriteHost(hostname) {
   var h = hostname.toLowerCase();
@@ -146,6 +152,46 @@ function isAzuriteHost(hostname) {
     h === '[::1]' ||
     h.indexOf('127.') === 0
   );
+}
+
+// -- Custom storage host discovery --------------------------------------------
+// Build a set of additional hostnames that should be treated as storage
+// endpoints. This covers:
+//  - Azurite behind a Docker service name (e.g. http://azurite:10000/...)
+//  - Custom domains configured via AZURE_*_SERVICE_URL
+
+var customStorageHosts = (function buildCustomHosts() {
+  var hosts = {};
+  var envKeys = [
+    'AZURE_BLOB_SERVICE_URL',
+    'AZURE_QUEUE_SERVICE_URL',
+    'AZURE_TABLE_SERVICE_URL',
+    'AZURE_FILE_SERVICE_URL',
+  ];
+  for (var i = 0; i < envKeys.length; i++) {
+    var raw = process.env[envKeys[i]];
+    if (!raw) continue;
+    try {
+      var h = new URL(raw).hostname.toLowerCase();
+      // Skip hosts already covered by identifyService or isAzuriteHost
+      if (!identifyService(h) && !isAzuriteHost(h)) {
+        hosts[h] = true;
+      }
+    } catch (e) { /* ignore invalid URLs */ }
+  }
+  return hosts;
+})();
+
+/**
+ * Check whether a hostname is any known storage endpoint:
+ * standard Azure Storage, Azurite (localhost/127.x/[::1]), or a custom
+ * host from AZURE_*_SERVICE_URL (e.g. Docker service name).
+ */
+function isStorageHost(hostname) {
+  if (identifyService(hostname)) return true;
+  if (isAzuriteHost(hostname)) return true;
+  if (customStorageHosts[hostname.toLowerCase()]) return true;
+  return false;
 }
 
 /**
@@ -167,12 +213,16 @@ function maybeHmacName(name) {
 }
 
 /**
- * Scrub an Azure Storage URL, keeping only scheme + host + resource name.
+ * Scrub a URL for storage endpoints, keeping scheme + host + resource name.
  * Removes blob paths, file paths, entity keys, queries -- everything after
  * the resource name (container/queue/table/share).
  *
- * Supports all four Azure services and Azurite emulator URLs.
- * Non-Azure URLs are returned unchanged.
+ * Supports all four Azure services, Azurite emulator URLs (localhost, 127.x,
+ * [::1]), and custom storage hosts from AZURE_*_SERVICE_URL (e.g. Docker
+ * service name like http://azurite:10000/...).
+ *
+ * Non-storage URLs are returned unchanged (use scrubOutboundUrl for full
+ * outbound scrubbing).
  */
 function scrubStorageUrl(url) {
   if (!url || !isPiiScrubEnabled()) return url;
@@ -186,14 +236,15 @@ function scrubStorageUrl(url) {
 
   var hostname = parsed.hostname;
   var serviceType = identifyService(hostname);
-  var azurite = isAzuriteHost(hostname);
+  var azuriteOrCustom = isAzuriteHost(hostname) ||
+    (!!customStorageHosts[hostname.toLowerCase()]);
 
-  if (!serviceType && !azurite) return url;
+  if (!serviceType && !azuriteOrCustom) return url;
 
   var segments = parsed.pathname.split('/').filter(function (s) { return s.length > 0; });
   var prefix = parsed.protocol + '//' + parsed.host;
 
-  if (azurite) {
+  if (azuriteOrCustom) {
     if (segments.length < 2) {
       return prefix + '/' + (segments[0] || '');
     }
@@ -208,20 +259,53 @@ function scrubStorageUrl(url) {
 }
 
 /**
- * Scrub a URL path, keeping only the first path segment (resource name).
+ * Scrub any outbound URL for span attributes.
+ *
+ * Storage endpoints (Azure, Azurite, custom hosts from AZURE_*_SERVICE_URL):
+ *   scheme + host + resource name only (no blob path, no query).
+ *
+ * Non-storage endpoints:
+ *   scheme + host only (no path, no query, no fragment).
+ *   This prevents source URLs (e.g. from blob-upload-from-url) from
+ *   leaking file names, SAS tokens, or query parameters into telemetry.
+ */
+function scrubOutboundUrl(url) {
+  if (!url || !isPiiScrubEnabled()) return url;
+
+  var parsed;
+  try {
+    parsed = new URL(url);
+  } catch (e) {
+    return url;
+  }
+
+  var hostname = parsed.hostname;
+
+  // Storage endpoint: delegate to scrubStorageUrl for resource-name retention
+  if (isStorageHost(hostname)) {
+    return scrubStorageUrl(url);
+  }
+
+  // Non-storage endpoint: scheme + host only
+  return parsed.protocol + '//' + parsed.host;
+}
+
+/**
+ * Scrub a URL path for storage endpoints, keeping only the resource name.
  * Used for url.path / http.target attributes.
  */
 function scrubStoragePath(path, hostname) {
   if (!path) return path;
 
   var serviceType = identifyService(hostname || '');
-  var azurite = isAzuriteHost(hostname || '');
+  var azuriteOrCustom = isAzuriteHost(hostname || '') ||
+    (!!customStorageHosts[(hostname || '').toLowerCase()]);
 
-  if (!serviceType && !azurite) return path;
+  if (!serviceType && !azuriteOrCustom) return path;
 
   var segments = path.split('/').filter(function (s) { return s.length > 0; });
 
-  if (azurite) {
+  if (azuriteOrCustom) {
     if (segments.length < 2) return path;
     var accountName = segments[0];
     var resourceName = stripEntityKeys(segments[1]);
@@ -234,6 +318,23 @@ function scrubStoragePath(path, hostname) {
 }
 
 /**
+ * Scrub any outbound URL path for span attributes.
+ *
+ * Storage endpoints: keeps resource name (delegates to scrubStoragePath).
+ * Non-storage endpoints: returns '/' (strip all path information).
+ */
+function scrubOutboundPath(path, hostname) {
+  if (!path) return path;
+
+  if (isStorageHost(hostname || '')) {
+    return scrubStoragePath(path, hostname);
+  }
+
+  // Non-storage: strip the entire path
+  return '/';
+}
+
+/**
  * Extract hostname from a URL string. Returns empty string on parse failure.
  */
 function extractHostname(url) {
@@ -241,6 +342,73 @@ function extractHostname(url) {
     return new URL(url).hostname;
   } catch (e) {
     return '';
+  }
+}
+
+/**
+ * Scrub URL attributes on any span (HTTP or undici).
+ *
+ * @param {object} span - An OTel Span with setAttribute/attributes.
+ * @param {boolean} outbound - If true, non-storage URLs are also scrubbed
+ *   to scheme+host only. If false, only storage URLs are scrubbed (backward
+ *   compatible behaviour for incoming HTTP spans).
+ */
+function scrubSpanUrlAttributes(span, outbound) {
+  if (!isPiiScrubEnabled()) return;
+
+  var hostname = '';
+  var fullUrlAttrs = ['url.full', 'http.url'];
+  var pathAttrs = ['url.path', 'http.target'];
+  var queryAttr = 'url.query';
+  var scrubUrlFn = outbound ? scrubOutboundUrl : scrubStorageUrl;
+  var scrubPathFn = outbound ? scrubOutboundPath : scrubStoragePath;
+
+  try {
+    var attrs = span.attributes;
+    if (!attrs) return;
+
+    // First pass: scrub full URLs and extract hostname
+    for (var i = 0; i < fullUrlAttrs.length; i++) {
+      var attr = fullUrlAttrs[i];
+      if (typeof attrs[attr] === 'string') {
+        if (!hostname) {
+          hostname = extractHostname(attrs[attr]);
+        }
+        var scrubbed = scrubUrlFn(attrs[attr]);
+        if (scrubbed !== attrs[attr]) {
+          span.setAttribute(attr, scrubbed);
+        }
+      }
+    }
+
+    // Second pass: scrub path attributes
+    if (hostname) {
+      for (var j = 0; j < pathAttrs.length; j++) {
+        var pAttr = pathAttrs[j];
+        if (typeof attrs[pAttr] === 'string') {
+          var scrubbedPath = scrubPathFn(attrs[pAttr], hostname);
+          if (scrubbedPath !== attrs[pAttr]) {
+            span.setAttribute(pAttr, scrubbedPath);
+          }
+        }
+      }
+    }
+
+    // Remove query string for storage URLs; for outbound non-storage,
+    // the full URL is already stripped to scheme+host (no query possible).
+    if (hostname && isStorageHost(hostname)) {
+      if (typeof attrs[queryAttr] === 'string' && attrs[queryAttr].length > 0) {
+        span.setAttribute(queryAttr, '');
+      }
+    }
+    // For outbound non-storage spans, also strip query if present
+    if (outbound && hostname && !isStorageHost(hostname)) {
+      if (typeof attrs[queryAttr] === 'string' && attrs[queryAttr].length > 0) {
+        span.setAttribute(queryAttr, '');
+      }
+    }
+  } catch (e) {
+    // Swallow -- never break instrumentation for scrubbing errors.
   }
 }
 
@@ -280,65 +448,34 @@ var logRecordProcessor = new BatchLogRecordProcessor({ exporter: logExporter });
 var instrumentations = getNodeAutoInstrumentations({
   // fs instrumentation is too noisy -- disable it.
   '@opentelemetry/instrumentation-fs': { enabled: false },
-  // PII scrubbing: outbound HTTP spans to Azure Storage have their URL
-  // attributes scrubbed to remove blob paths, file paths, entity keys,
-  // and query strings. Only scheme + host + resource name is kept.
+  // PII scrubbing for outbound HTTP spans (http/https modules).
+  // Storage URLs: scheme + host + resource name only.
+  // Non-storage URLs handled by incoming/outgoing distinction.
   // Incoming spans get session attributes attached.
   '@opentelemetry/instrumentation-http': {
     startIncomingSpanHook: function (request) {
       return sessionAttributes(request);
     },
     applyCustomAttributesOnSpan: function (span) {
-      if (!isPiiScrubEnabled()) return;
-
-      // Determine the hostname from url.full or http.url for path scrubbing
-      var hostname = '';
-
-      // Scrub URL attributes that may contain blob names / PII.
-      var fullUrlAttrs = ['url.full', 'http.url'];
-      var pathAttrs = ['url.path', 'http.target'];
-      var queryAttr = 'url.query';
-
-      try {
-        var attrs = span.attributes;
-        if (!attrs) return;
-
-        // First pass: scrub full URLs and extract hostname
-        for (var i = 0; i < fullUrlAttrs.length; i++) {
-          var attr = fullUrlAttrs[i];
-          if (typeof attrs[attr] === 'string') {
-            if (!hostname) {
-              hostname = extractHostname(attrs[attr]);
-            }
-            var scrubbed = scrubStorageUrl(attrs[attr]);
-            if (scrubbed !== attrs[attr]) {
-              span.setAttribute(attr, scrubbed);
-            }
-          }
-        }
-
-        // Second pass: scrub path attributes
-        if (hostname) {
-          for (var j = 0; j < pathAttrs.length; j++) {
-            var pAttr = pathAttrs[j];
-            if (typeof attrs[pAttr] === 'string') {
-              var scrubbedPath = scrubStoragePath(attrs[pAttr], hostname);
-              if (scrubbedPath !== attrs[pAttr]) {
-                span.setAttribute(pAttr, scrubbedPath);
-              }
-            }
-          }
-        }
-
-        // Remove query string entirely for Azure Storage URLs
-        if (hostname && (identifyService(hostname) || isAzuriteHost(hostname))) {
-          if (typeof attrs[queryAttr] === 'string' && attrs[queryAttr].length > 0) {
-            span.setAttribute(queryAttr, '');
-          }
-        }
-      } catch (e) {
-        // Swallow -- never break instrumentation for scrubbing errors.
-      }
+      // HTTP instrumentation fires for both incoming and outgoing spans.
+      // Use outbound=true for all -- incoming /mcp, /upload, /health paths
+      // are not storage URLs so scrubStorageUrl returns them unchanged,
+      // and scrubOutboundUrl also returns scheme+host for non-storage
+      // (which is fine -- incoming spans have the server's own host).
+      scrubSpanUrlAttributes(span, true);
+    },
+  },
+  // PII scrubbing for undici (Node.js fetch) spans.
+  // These are generated by the undici instrumentation when fetch() is
+  // called (e.g. blob-upload-from-url). Without this hook, source URLs
+  // including SAS tokens and file names leak into telemetry.
+  '@opentelemetry/instrumentation-undici': {
+    startSpanHook: function () {
+      // No extra attributes needed on span start.
+      return {};
+    },
+    responseHook: function (span) {
+      scrubSpanUrlAttributes(span, true);
     },
   },
 });

@@ -127,27 +127,39 @@ describe("getTlsConfig", () => {
 // ---------------------------------------------------------------------------
 
 describe("TRUST_PROXY_HOPS defaults", () => {
+  // Mirror the exact expression from server.ts lines 104-105:
+  //   const trustProxyDefault = tlsConfig ? 0 : 1;
+  //   app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS || trustProxyDefault));
+
+  /** Replicate the server.ts trust-proxy calculation for testing. */
+  function computeTrustProxy(
+    tlsConfig: object | null,
+    envValue: string | undefined,
+  ): number {
+    const trustProxyDefault = tlsConfig ? 0 : 1;
+    return Number(envValue || trustProxyDefault);
+  }
+
   it("defaults to 0 when TLS is active (no proxy in front)", () => {
-    // When TLS is active, the default trust proxy should be 0.
-    // This is tested by checking the logic directly -- the server.ts
-    // uses `tlsConfig ? 0 : 1` as the default.
-    const tlsActive = true;
-    const trustProxyDefault = tlsActive ? 0 : 1;
-    expect(trustProxyDefault).toBe(0);
+    expect(computeTrustProxy({}, undefined)).toBe(0);
   });
 
   it("defaults to 1 when TLS is not active (behind proxy)", () => {
-    const tlsActive = false;
-    const trustProxyDefault = tlsActive ? 0 : 1;
-    expect(trustProxyDefault).toBe(1);
+    expect(computeTrustProxy(null, undefined)).toBe(1);
   });
 
-  it("explicit TRUST_PROXY_HOPS overrides the default", () => {
-    const explicitValue = "2";
-    // The server.ts logic: Number(process.env.TRUST_PROXY_HOPS || trustProxyDefault)
-    const trustProxyDefault = 0; // TLS active
-    const result = Number(explicitValue || trustProxyDefault);
-    expect(result).toBe(2);
+  it("explicit TRUST_PROXY_HOPS=2 overrides the TLS default", () => {
+    expect(computeTrustProxy({}, "2")).toBe(2);
+  });
+
+  it("explicit TRUST_PROXY_HOPS=0 is respected (not treated as falsy)", () => {
+    // "0" is a truthy string, so Number("0" || 1) === 0. Verify.
+    expect(computeTrustProxy(null, "0")).toBe(0);
+  });
+
+  it("empty TRUST_PROXY_HOPS falls back to the default", () => {
+    expect(computeTrustProxy({}, "")).toBe(0);
+    expect(computeTrustProxy(null, "")).toBe(1);
   });
 });
 

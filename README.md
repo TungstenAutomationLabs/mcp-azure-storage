@@ -620,6 +620,21 @@ curl http://localhost:3000/health
 # → {"status":"healthy"}
 ```
 
+> **Health check under TLS:** When running with `TLS_CERT_FILE` and `TLS_KEY_FILE`,
+> the server listens on HTTPS. If your certificate is self-signed (common in dev),
+> `curl` will reject it. Use `--insecure` (or `-k`) to skip verification:
+>
+> ```bash
+> curl -k https://localhost:3000/health
+> # → {"status":"healthy"}
+> ```
+>
+> In containers where `curl` is not installed, you can use Node.js directly:
+>
+> ```bash
+> node -e "const https=require('https');https.get('https://localhost:3000/health',{rejectUnauthorized:false},r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>{console.log(d);process.exit(r.statusCode===200?0:1)})})"
+> ```
+
 ---
 
 ## Testing with Postman
@@ -1219,7 +1234,10 @@ echo "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" >> .env
 | `RATE_LIMIT_UPLOAD_MAX` | No | `600` | Max requests per window for `/upload` (multipart) per identity |
 | `RATE_LIMIT_WINDOW_MINUTES` | No | `15` | Legacy rate limit window (minutes). Used when `RATE_LIMIT_WINDOW_SECONDS` is unset |
 | `RATE_LIMIT_MAX_REQUESTS` | No | `300` | Legacy max requests per window. Used for both endpoints when specific `*_MAX` vars are unset |
-| `TRUST_PROXY_HOPS` | No | `1` | Number of trusted reverse proxy hops for X-Forwarded-For resolution. Set `2` if behind both a CDN and Container Apps |
+| `TRUST_PROXY_HOPS` | No | `0` (TLS) / `1` (no TLS) | Number of trusted reverse proxy hops for X-Forwarded-For resolution. Default is `0` when TLS is served directly (no proxy in front), `1` when behind a reverse proxy. Set `2` if behind both a CDN and Container Apps. |
+| `TLS_CERT_FILE` | No | *(unset)* | Path to a PEM-encoded TLS certificate file. When set together with `TLS_KEY_FILE`, the server starts HTTPS directly instead of plain HTTP. Supports certificate hot-reload (SIGHUP or file-watch). |
+| `TLS_KEY_FILE` | No | *(unset)* | Path to a PEM-encoded TLS private key file. Must be set together with `TLS_CERT_FILE`. |
+| `TLS_MIN_VERSION` | No | `TLSv1.3` | Minimum TLS protocol version. Accepts `TLSv1.2` or `TLSv1.3`. |
 | `MAX_SESSIONS` | No | `100` | Maximum concurrent stateful MCP sessions (returns 503 when full) |
 | `SESSION_RETRY_AFTER_SECONDS` | No | `30` | Retry hint (seconds) returned in 503 session-capacity errors |
 | `SSE_KEEPALIVE_INTERVAL_MS` | No | `30000` | Interval (ms) between SSE keepalive heartbeats. Prevents Azure reverse proxy from killing idle SSE connections (~240s timeout). |
@@ -1239,6 +1257,8 @@ echo "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" >> .env
 | `OTEL_LOG_MIN_SEVERITY` | *(per preset)* | Minimum severity for both console and OTel log output (e.g. `WARN`, `INFO`, `ERROR`). |
 | `OTEL_TRACES_SAMPLER_ARG` | *(per preset)* | Trace sampling ratio (`0.0` to `1.0`). Overrides the preset value. |
 | `OTEL_METRICS_EXPORT_INTERVAL_MS` | *(per preset)* | Metrics export interval in milliseconds. Overrides the preset value. |
+| `OTEL_SCRUB_PII` | `true` | Enable PII scrubbing on outbound spans. When `true`, blob paths, file names, SAS tokens, and query strings are stripped from telemetry. Set `false` to see full URLs in traces (not recommended for production). |
+| `OTEL_SCRUB_HMAC_KEY` | *(unset)* | When set, resource names (container, queue, table, share) in scrubbed telemetry are replaced with a deterministic 16-character HMAC hex digest. This preserves correlation across spans without revealing the actual names to the telemetry backend. Use any string as the key. |
 | `ENABLE_OTEL` | `false` | Bicep parameter to deploy the OTel Collector sidecar and Application Insights. |
 
 > **Note:** The Azure deployment uses `minReplicas: 1` to keep at least one replica always running, ensuring consistent response times and no cold-start connection drops. The Container App auto-scales up to 5 replicas under load (HTTP concurrency threshold: 20 requests). If you want to reduce costs in a non-production environment, you can set `minReplicas: 0` in [`infra/main.bicep`](infra/main.bicep:342), but be aware that scale-to-zero causes 10-30 second cold starts that may time out HTTP clients like Postman.
@@ -1503,3 +1523,6 @@ The push script will:
 ## License
 
 See [LICENSE](LICENSE) for details.
+
+For a complete list of third-party open-source libraries and their licences,
+see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).

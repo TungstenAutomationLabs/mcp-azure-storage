@@ -162,6 +162,49 @@ function isAzuriteHost(hostname: string): boolean {
   );
 }
 
+// -- Custom storage host discovery (v1.4.1+) ----------------------------------
+// Build a set of additional hostnames that should be treated as storage
+// endpoints. Covers Azurite behind a Docker service name (e.g.
+// http://azurite:10000/...) and custom domains from AZURE_*_SERVICE_URL.
+
+const customStorageHosts: Record<string, boolean> = (() => {
+  const hosts: Record<string, boolean> = {};
+  const envKeys = [
+    "AZURE_BLOB_SERVICE_URL",
+    "AZURE_QUEUE_SERVICE_URL",
+    "AZURE_TABLE_SERVICE_URL",
+    "AZURE_FILE_SERVICE_URL",
+  ];
+  for (const key of envKeys) {
+    const raw = process.env[key];
+    if (!raw) continue;
+    try {
+      const h = new URL(raw).hostname.toLowerCase();
+      if (!identifyAzureService(h) && !isAzuriteHost(h)) {
+        hosts[h] = true;
+      }
+    } catch {
+      /* ignore invalid URLs */
+    }
+  }
+  return hosts;
+})();
+
+/**
+ * Check whether a hostname is any known storage endpoint: standard Azure
+ * Storage, Azurite (localhost/127.x/[::1]), or a custom host discovered
+ * from AZURE_*_SERVICE_URL (e.g. Docker service name).
+ *
+ * @param hostname - The URL hostname.
+ * @returns True if the hostname is a known storage endpoint.
+ */
+export function isStorageHost(hostname: string): boolean {
+  if (identifyAzureService(hostname)) return true;
+  if (isAzuriteHost(hostname)) return true;
+  if (customStorageHosts[hostname.toLowerCase()]) return true;
+  return false;
+}
+
 /**
  * Strip entity key parentheses from a table name.
  * Table URLs may include entity keys like `TableName(PartitionKey='...',RowKey='...')`.
@@ -184,12 +227,13 @@ function stripEntityKeys(segment: string): string {
  * container, queue, table, or share). Everything after -- blob paths, file
  * paths, entity keys, message IDs, query strings -- is removed entirely.
  *
- * Supports all four Azure Storage services (blob, queue, table, file)
- * and Azurite emulator URLs (localhost with account-name prefix).
+ * Supports all four Azure Storage services (blob, queue, table, file),
+ * Azurite emulator URLs (localhost with account-name prefix), and custom
+ * storage hosts from AZURE_*_SERVICE_URL (e.g. Docker service names).
  *
  * When `OTEL_SCRUB_HMAC_KEY` is set, the resource name is HMAC'd.
  *
- * Non-Azure-Storage URLs are returned unchanged.
+ * Non-storage URLs are returned unchanged.
  *
  * @example
  *   scrubUrl("https://acct.blob.core.windows.net/mycontainer/path/to/secret.pdf?sv=...")
@@ -199,7 +243,7 @@ function stripEntityKeys(segment: string): string {
  *   // => "https://acct.table.core.windows.net/MyTable"
  *
  * @param url - The raw URL string.
- * @returns The URL with PII removed, or the original if not Azure Storage.
+ * @returns The URL with PII removed, or the original if not a storage URL.
  */
 export function scrubUrl(url: string): string {
   if (!url) return url;
@@ -216,24 +260,26 @@ export function scrubUrl(url: string): string {
 
   // Identify service type from hostname
   const serviceType = identifyAzureService(hostname);
-  const isAzurite = isAzuriteHost(hostname);
+  const azuriteOrCustom =
+    isAzuriteHost(hostname) ||
+    !!customStorageHosts[hostname.toLowerCase()];
 
-  if (!serviceType && !isAzurite) {
-    // Not an Azure Storage URL -- return unchanged
+  if (!serviceType && !azuriteOrCustom) {
+    // Not a storage URL -- return unchanged
     return url;
   }
 
   // Split path into segments (filter empty from leading/trailing slashes)
   const segments = parsed.pathname.split("/").filter((s) => s.length > 0);
 
-  // For Azurite URLs, the first segment is the account name (e.g. "devstoreaccount1"),
-  // and the second segment is the resource name. For production Azure URLs, the
-  // first segment is the resource name directly.
+  // For Azurite / custom host URLs, the first segment is the account name
+  // (e.g. "devstoreaccount1"), and the second segment is the resource name.
+  // For production Azure URLs, the first segment is the resource name directly.
   let resourceName: string;
   let prefix: string;
 
-  if (isAzurite) {
-    // Azurite: scheme://host:port/accountName/resourceName/...
+  if (azuriteOrCustom) {
+    // Azurite/custom: scheme://host:port/accountName/resourceName/...
     if (segments.length < 2) {
       // Only account name, no resource -- return origin + account
       return `${parsed.protocol}//${parsed.host}/${segments[0] || ""}`;
@@ -261,13 +307,47 @@ export function scrubUrl(url: string): string {
   return `${prefix}/${scrubbedResourceName}`;
 }
 
+// -- Outbound URL scrubbing (v1.4.1+) -----------------------------------------
+
+/**
+ * Scrub any outbound URL for span attributes.
+ *
+ * Storage endpoints (Azure, Azurite, custom hosts from AZURE_*_SERVICE_URL):
+ *   scheme + host + resource name only (delegates to scrubUrl).
+ *
+ * Non-storage endpoints:
+ *   scheme + host only (no path, no query, no fragment).
+ *   This prevents source URLs (e.g. from blob-upload-from-url) from
+ *   leaking file names, SAS tokens, or query parameters into telemetry.
+ *
+ * @param url - The raw URL string.
+ * @returns The scrubbed URL.
+ */
+export function scrubOutboundUrl(url: string): string {
+  if (!url) return url;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+
+  if (isStorageHost(parsed.hostname)) {
+    return scrubUrl(url);
+  }
+
+  // Non-storage: scheme + host only
+  return `${parsed.protocol}//${parsed.host}`;
+}
+
 // -- Path scrubbing -----------------------------------------------------------
 
 /**
  * Scrub a URL path for the `url.path` / `http.target` span attribute.
  *
- * Returns only the first path segment (resource name) for Azure Storage
- * URLs, or the full path for non-Azure URLs.
+ * Returns only the first path segment (resource name) for storage URLs,
+ * or the full path for non-storage URLs.
  *
  * @param path - The raw URL path (e.g. "/container/blob/path").
  * @param hostname - The hostname to identify the service type.
@@ -277,15 +357,17 @@ export function scrubUrlPath(path: string, hostname: string): string {
   if (!path) return path;
 
   const serviceType = identifyAzureService(hostname);
-  const isAzurite = isAzuriteHost(hostname);
+  const azuriteOrCustom =
+    isAzuriteHost(hostname) ||
+    !!customStorageHosts[hostname.toLowerCase()];
 
-  if (!serviceType && !isAzurite) {
+  if (!serviceType && !azuriteOrCustom) {
     return path;
   }
 
   const segments = path.split("/").filter((s) => s.length > 0);
 
-  if (isAzurite) {
+  if (azuriteOrCustom) {
     if (segments.length < 2) return path;
     const accountName = segments[0];
     const resourceName = stripEntityKeys(segments[1]);
