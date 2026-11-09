@@ -348,7 +348,7 @@ let _disabledToolsValidated = false;
 
 /** Canonical set of all tool names registered by the tool modules. */
 export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
-  // blob-tools.ts (13 tools)
+  // blob-tools.ts (14 tools)
   "blob-container-create",
   "blob-container-delete",
   "blob-container-exists",
@@ -357,6 +357,7 @@ export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "blob-head",
   "blob-read",
   "blob-delete",
+  "blob-delete-batch",
   "blob-set-metadata",
   "blob-set-tier",
   "blob-get-sas-url",

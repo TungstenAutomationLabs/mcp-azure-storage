@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] -- 2026-11-09
+
+### Added
+
+- **`blob-delete-batch` tool** -- delete up to 256 blobs in a single request using the Azure Blob Batch API. Each blob receives an individual status (`deleted`, `not_found`, or `failed`) so callers can handle partial failures. Blobs that do not exist are reported as `not_found` (safe for retries). Per-blob transient errors (e.g. 429, 503) are surfaced individually in the results array rather than thrown.
+- **Unit tests** -- 5 new tests in `tests/tools/blob-tools.test.ts` covering result shape, per-blob failures, >256 rejection, empty list rejection, and KNOWN_TOOLS membership.
+- **Integration tests** -- 3 new tests in `tests/integration/blob-integration.test.ts` covering batch delete of multiple blobs, missing-blob handling, and single-blob edge case.
+- `blob-delete-batch` added to `KNOWN_TOOLS` set in `src/utils/metrics.ts` (43 total) and `KNOWN_TOOL_NAMES` in `src/server.ts`.
+
+### Changed
+
+- Total tool count increases from 42 to **43** (new: `blob-delete-batch`).
+- Blob tool count increases from 13 to **14**.
+- README, repo guide, architecture diagram, and test coverage descriptions updated to reflect new counts.
+
 ## [1.3.0] -- 2026-11-06
 
 ### Breaking

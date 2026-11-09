@@ -1,6 +1,6 @@
 # MCP Azure Storage Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **42 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes **43 tools** and **12 resources** for managing Azure Storage — Blob, Queue, Table, and File Share — over a single HTTP endpoint. Designed for use with AI assistants (Claude, RooCode, Copilot), Postman, MCP Inspector, and any MCP-compatible client.
 
 Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed identity, and Bicep infrastructure-as-code.
 
@@ -8,7 +8,7 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
 
 ## Features
 
-- **42 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
+- **43 MCP tools** across 5 categories (Blob, Queue, Table, File Share, Utilities)
 - **12 MCP resources** — read-only, URI-addressable data for LLM context (listings, content reads, properties)
 - **Direct file upload** — `POST /upload` endpoint streams multipart form-data to Azure via busboy (no temp files, no full-file buffering)
 - **URL-based upload** — `blob-upload-from-url` tool fetches files server-side (no base64 through LLM context)
@@ -44,9 +44,9 @@ Deploys to **Azure Container Apps** with automatic HTTPS, user-assigned managed 
                                       └──────────┬───────────────┘
                                                   │
                       ┌───────────────────────────┬┴──────────────────────────┐
-                      │      42 Tools (actions)   │    12 Resources (reads)   │
+                      │      43 Tools (actions)   │    12 Resources (reads)   │
                       ├───────────────────────────┼───────────────────────────┤
-                      │ Blob (13) │ Queue (8)     │ Blob (4)  │ Queue (2)    │
+                      │ Blob (14) │ Queue (8)     │ Blob (4)  │ Queue (2)    │
                       │ Table (5) │ FileShare (8) │ Table (2) │ FileShare (4)│
                       │ Utility (8)               │                          │
                       └───────────┬───────────────┴──────────┬───────────────┘
@@ -79,11 +79,11 @@ mcp-azure-storage/
 │   ├── middleware/
 │   │   └── api-key.ts             # API key auth (X-API-Key / Bearer)
 │   ├── tools/
-│   │   ├── blob-tools.ts          # 13 tools -- container + blob CRUD, head, set-tier, SAS, metadata, URL upload
+│   │   ├── blob-tools.ts          # 14 tools -- container + blob CRUD, head, set-tier, SAS, metadata, batch delete, URL upload
 │   │   ├── queue-tools.ts         #  8 tools -- queue CRUD + message operations + lease renewal
 │   │   ├── table-tools.ts         #  5 tools -- table CRUD + entity operations
 │   │   ├── fileshare-tools.ts     #  8 tools -- share/directory/file operations
-│   │   └── utility-tools.ts       #  7 tools -- base64, SAS refresh, MIME lookup, upload info
+│   │   └── utility-tools.ts       #  8 tools -- base64, SAS refresh, MIME lookup, upload info, store-info
 │   ├── utils/
 │   │   ├── errors.ts              # Structured error mapping + server.tool() wrapper
 │   │   ├── format.ts              # Response formatting (JSON/HTML/MD) utility
@@ -168,7 +168,7 @@ mcp-azure-storage/
 
 ## Response Format Option
 
-All 42 tools accept an optional `format` parameter that controls how structured data is returned:
+All 43 tools accept an optional `format` parameter that controls how structured data is returned:
 
 | Value | Description |
 |-------|-------------|
@@ -200,7 +200,7 @@ All 42 tools accept an optional `format` parameter that controls how structured 
 
 ## Structured Error Model
 
-All 42 tools return **structured error JSON** when an operation fails. Instead of plain-text error messages, every error response uses `isError: true` with a single text content item containing a JSON object. This makes errors machine-parseable for automated retry logic, error routing, and client-side handling.
+All 43 tools return **structured error JSON** when an operation fails. Instead of plain-text error messages, every error response uses `isError: true` with a single text content item containing a JSON object. This makes errors machine-parseable for automated retry logic, error routing, and client-side handling.
 
 ### Error Response Shape
 
@@ -293,7 +293,7 @@ if (response.isError) {
 
 ## Available Tools
 
-### Blob Storage (13 tools)
+### Blob Storage (14 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -306,6 +306,7 @@ if (response.isError) {
 | `blob-head` | Get blob properties (metadata, content type, size, tier, immutability, legal hold) without downloading content. Supports version-specific lookups via `versionId`. Use to inspect a blob's state before reading, deleting, or changing its tier. |
 | `blob-read` | Download blob content as base64, or set `returnUrl=true` to get a time-limited SAS URL instead. Use `util-from-base64` to decode text. Supports version-specific reads via `versionId` and partial reads via `maxBytes` (returns `truncated: true` when the blob is larger). |
 | `blob-delete` | **Destructive** — permanently delete a blob and its snapshots. Supports version-specific deletion via `versionId`. Returns a structured `immutable` error if the blob has an immutability policy or legal hold. |
+| `blob-delete-batch` | **Destructive** — delete up to 256 blobs in a single request using the Azure Blob Batch API. Blobs that do not exist are reported as `not_found` (safe for retries). Per-blob errors (e.g. 429, 503) are reported individually in the results array, not thrown. Use instead of `blob-delete` when removing several blobs efficiently. |
 | `blob-set-metadata` | Replace all custom metadata on a blob. Include existing keys you want to keep — this is a full replacement. |
 | `blob-set-tier` | Change a blob's access tier (Hot, Cool, or Archive). Use for lifecycle cost optimisation. Moving to Archive is **potentially destructive** — archived blobs must be rehydrated before reading, which can take hours. Supports version-specific tier changes via `versionId` and `rehydratePriority` (High or Standard). |
 | `blob-get-sas-url` | Generate a time-limited SAS URL for a specific blob. Use to grant temporary access without exposing account keys. |
@@ -599,17 +600,17 @@ npm run dev
 You should see:
 
 ```
-🚀 MCP Azure Storage Server v1.2.2
+  MCP Azure Storage Server v1.4.0
    MCP endpoint : http://localhost:3000/mcp
+   Upload       : http://localhost:3000/upload
    Health check : http://localhost:3000/health
-   Modes        : Stateful (session) + Stateless (one-shot)
-   API key auth : ✅ ENABLED
-   CORS         : ✅ ENABLED
-   Rate limit   : 300 req / 15 min per IP
-   Session TTL  : 30 minutes
-   Max sessions : 100
-   SSE keepalive: 30s
+   Mode         : Stateless (per-request, multi-replica safe)
+   TLS          : DISABLED (plain HTTP)
+   API key auth : ENABLED
+   CORS         : ENABLED
+   Rate limit   : MCP 3000 / Upload 600 per 900s (API-key-aware)
    JSON limit   : 50mb
+   Upload limit : 5120mb (streaming to Azure)
 ```
 
 ### 4. Verify
@@ -1308,7 +1309,7 @@ The deployment includes three mechanisms to ensure reliable connections:
 
 ## Testing
 
-### Unit Tests (330 tests across 19 test files, no Azure required)
+### Unit Tests (no Azure required)
 
 Unit tests mock all Azure SDK modules and test through a stateless MCP HTTP endpoint using supertest. No Azure credentials or network access needed.
 
@@ -1323,7 +1324,7 @@ npm run test:watch
 npm run test:coverage
 ```
 
-**Test coverage:** Config, API key middleware, rate limiting, disabled-tool gating, structured errors, all 42 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD), OTel instrumentation bootstrap, session attribute extraction, multipart upload endpoint, and OTel logger dual-output.
+**Test coverage:** Config, API key middleware, rate limiting, disabled-tool gating, structured errors, all 43 tools across 5 modules, all 12 resources across 4 modules, format utility (JSON/HTML/MD), OTel instrumentation bootstrap, session attribute extraction, multipart upload endpoint, OTel logger dual-output, TLS termination, PII scrubbing, and metrics utilities.
 
 ### Integration Tests (Azurite)
 
