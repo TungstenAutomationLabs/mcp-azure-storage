@@ -244,6 +244,11 @@ Each environment's `.azure/<env-name>/.env` file can contain:
 | `AZURE_STORAGE_ACCOUNT_NAME` | No | `azd env set` | Existing storage account name (BYOSA) |
 | `AZURE_STORAGE_ACCOUNT_KEY` | No | `azd env set` | Existing storage account key (BYOSA) |
 | `CORS_ENABLED` | No | `azd env set` | Enable CORS (`true`/`false`, default: `true`) |
+| `TLS_CERT_FILE` | No | `azd env set` | Path to PEM TLS certificate. Enables HTTPS when set with `TLS_KEY_FILE`. |
+| `TLS_KEY_FILE` | No | `azd env set` | Path to PEM TLS private key. Must be set with `TLS_CERT_FILE`. |
+| `TLS_MIN_VERSION` | No | `azd env set` | Minimum TLS version: `TLSv1.2` or `TLSv1.3` (default). |
+| `TRUST_PROXY_HOPS` | No | `azd env set` | Trusted proxy hops. Default: `0` with TLS, `1` without. Set `2` for CDN + Container Apps. |
+| `OTEL_SCRUB_HMAC_KEY` | No | `azd env set` | HMAC key for resource name correlation in telemetry (replaces names with deterministic hashes). |
 | `AZURE_CONTAINER_REGISTRY_ENDPOINT` | — | Bicep output | Auto-populated after `azd provision` |
 | `mcpEndpoint` | — | Bicep output | Auto-populated after `azd provision` |
 | `storageAccountName` | — | Bicep output | Auto-populated after `azd provision` |

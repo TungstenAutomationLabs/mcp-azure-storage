@@ -20,6 +20,8 @@ import {
   scrubUrlPath,
   scrubBlobName,
   scrubContainerName,
+  scrubOutboundUrl,
+  isStorageHost,
   hmacValue,
   isPiiScrubEnabled,
   getHmacKey,
@@ -487,6 +489,115 @@ describe("telemetry-scrub", () => {
     it("GET /health route carries no sensitive data", () => {
       const incomingPath = "/health";
       expect(scrubUrlPath(incomingPath, "localhost")).toBe("/health");
+    });
+  });
+
+  // ========================================================================
+  // scrubOutboundUrl -- non-storage URLs stripped to scheme+host
+  // ========================================================================
+
+  describe("scrubOutboundUrl", () => {
+    it("strips path and query from non-storage URLs", () => {
+      expect(
+        scrubOutboundUrl("https://example.com/files/secret.pdf?token=abc")
+      ).toBe("https://example.com");
+    });
+
+    it("strips port-bearing non-storage URLs to scheme+host:port", () => {
+      expect(
+        scrubOutboundUrl("http://cdn.example.com:8080/assets/image.png")
+      ).toBe("http://cdn.example.com:8080");
+    });
+
+    it("delegates storage URLs to scrubUrl (keeps resource name)", () => {
+      expect(
+        scrubOutboundUrl(
+          "https://acct.blob.core.windows.net/mycontainer/path/to/blob.pdf?sv=2024"
+        )
+      ).toBe("https://acct.blob.core.windows.net/mycontainer");
+    });
+
+    it("delegates Azurite URLs to scrubUrl (keeps account + resource)", () => {
+      expect(
+        scrubOutboundUrl(
+          "http://127.0.0.1:10000/devstoreaccount1/container/blob.txt?comp=block"
+        )
+      ).toBe("http://127.0.0.1:10000/devstoreaccount1/container");
+    });
+
+    it("handles empty string input", () => {
+      expect(scrubOutboundUrl("")).toBe("");
+    });
+
+    it("handles invalid URL input gracefully", () => {
+      expect(scrubOutboundUrl("not-a-url")).toBe("not-a-url");
+    });
+  });
+
+  // ========================================================================
+  // isStorageHost -- identifies Azure, Azurite, and custom hosts
+  // ========================================================================
+
+  describe("isStorageHost", () => {
+    it("recognises standard Azure blob host", () => {
+      expect(isStorageHost("acct.blob.core.windows.net")).toBe(true);
+    });
+
+    it("recognises standard Azure queue host", () => {
+      expect(isStorageHost("acct.queue.core.windows.net")).toBe(true);
+    });
+
+    it("recognises standard Azure table host", () => {
+      expect(isStorageHost("acct.table.core.windows.net")).toBe(true);
+    });
+
+    it("recognises standard Azure file host", () => {
+      expect(isStorageHost("acct.file.core.windows.net")).toBe(true);
+    });
+
+    it("recognises localhost as Azurite", () => {
+      expect(isStorageHost("localhost")).toBe(true);
+    });
+
+    it("recognises 127.0.0.1 as Azurite", () => {
+      expect(isStorageHost("127.0.0.1")).toBe(true);
+    });
+
+    it("recognises [::1] as Azurite", () => {
+      expect(isStorageHost("[::1]")).toBe(true);
+    });
+
+    it("rejects non-storage hosts", () => {
+      expect(isStorageHost("example.com")).toBe(false);
+      expect(isStorageHost("google.com")).toBe(false);
+      expect(isStorageHost("cdn.example.com")).toBe(false);
+    });
+  });
+
+  // ========================================================================
+  // Docker service name / custom host scrubbing
+  // ========================================================================
+
+  describe("Docker / custom storage host scrubbing", () => {
+    it("scrubUrl handles Azurite Docker-style URLs (localhost)", () => {
+      const url =
+        "http://localhost:10000/devstoreaccount1/mycontainer/secret/file.txt?comp=block";
+      expect(scrubUrl(url)).toBe(
+        "http://localhost:10000/devstoreaccount1/mycontainer"
+      );
+    });
+
+    it("scrubOutboundUrl strips non-storage Docker URLs to scheme+host", () => {
+      expect(
+        scrubOutboundUrl("http://redis:6379/some/command?key=value")
+      ).toBe("http://redis:6379");
+    });
+
+    it("scrubUrlPath handles Azurite paths with account prefix", () => {
+      const path = "/devstoreaccount1/container/blob/nested/path.txt";
+      expect(scrubUrlPath(path, "127.0.0.1")).toBe(
+        "/devstoreaccount1/container"
+      );
     });
   });
 });

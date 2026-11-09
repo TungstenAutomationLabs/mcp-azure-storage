@@ -1464,8 +1464,9 @@ describe("blob-tools", () => {
       ).expect(200);
 
       const text = extractToolText(res);
-      // Zod should reject with a validation error about array length
+      // Zod should reject with a validation error referencing the 256 limit
       expect(text).toBeTruthy();
+      expect(text).toMatch(/256/);
       expect(mockDeleteBlobs).not.toHaveBeenCalled();
     });
 

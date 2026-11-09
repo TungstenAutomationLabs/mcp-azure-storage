@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] -- 2026-11-09
+
+### Fixed
+
+- **Undici/fetch span scrubbing** -- `blob-upload-from-url` calls `fetch(sourceUrl)` which is traced by the undici instrumentation. Previously, source URLs (including SAS tokens, file names, and query strings) leaked into telemetry because only the HTTP instrumentation hook was scrubbing spans. The undici instrumentation now has a `responseHook` that applies the same scrubbing: storage URLs keep scheme + host + resource name only; non-storage URLs are stripped to scheme + host only; query strings are always removed.
+- **Custom storage host detection** -- Azurite behind a Docker service name (e.g. `http://azurite:10000/...`) and custom domains from `AZURE_*_SERVICE_URL` env vars are now recognised as storage endpoints for PII scrubbing. Previously only standard Azure hostnames and `localhost`/`127.x`/`[::1]` were treated as storage.
+- **`TRUST_PROXY_HOPS` default corrected in README** -- the Configuration Reference table previously showed `1` as the default; corrected to `0` (TLS) / `1` (no TLS), matching the actual server.ts behaviour since v1.4.0.
+
+### Added
+
+- **`scrubOutboundUrl()` function** -- new exported function in `src/utils/pii-scrubber.ts` for scrubbing any outbound URL. Storage endpoints delegate to `scrubUrl()`; non-storage endpoints are stripped to scheme + host only.
+- **`isStorageHost()` function** -- new exported function in `src/utils/pii-scrubber.ts` that checks whether a hostname is any known storage endpoint (Azure, Azurite, or custom from `AZURE_*_SERVICE_URL`).
+- **`scrubSpanUrlAttributes()` in instrumentation.cjs** -- shared function for both HTTP and undici span scrubbing, replacing the inline HTTP-only implementation.
+- **Telemetry scrubbing integration test** -- `tests/integration/telemetry-scrub-integration.test.ts` wires real undici instrumentation to in-memory span exporters, performs fetch operations against Azurite, and asserts no blob paths, filenames, or query strings appear in exported spans.
+- **17 new unit tests** in `tests/utils/telemetry-scrub.test.ts` covering `scrubOutboundUrl`, `isStorageHost`, and Docker/custom host scrubbing.
+- **Stronger `blob-delete-batch` 257 assertion** -- the existing test now asserts the error message references "256".
+- **5 improved `TRUST_PROXY_HOPS` tests** -- rewritten to mirror the exact server.ts expression including `TRUST_PROXY_HOPS=0` edge case.
+
+### Changed
+
+- **Documentation** -- `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TLS_MIN_VERSION` added to README Configuration Reference and ENVIRONMENTS.md. `OTEL_SCRUB_PII` and `OTEL_SCRUB_HMAC_KEY` added to README Observability table. Health check under TLS guidance added to Quick Start section.
+
 ## [1.4.0] -- 2026-11-09
 
 ### Added
