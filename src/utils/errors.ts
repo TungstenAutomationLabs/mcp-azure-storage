@@ -17,7 +17,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
-import { maybeScrubBlobName, maybeScrubContainerName } from "./pii-scrubber.js";
+import { maybeScrubBlobName, maybeScrubContainerName, REDACTED_PLACEHOLDER } from "./pii-scrubber.js";
 
 // ── Structured error shape ───────────────────────────────────────────────────
 
@@ -76,16 +76,72 @@ export interface StructuredError {
 const SENSITIVE_PARAMS = ["sig", "se", "sp", "sr", "sk"];
 
 /**
- * Strip SAS signatures and other sensitive query parameters from a message.
+ * Pattern matching Azure Storage URLs in error messages.
+ * Captures URLs like https://account.blob.core.windows.net/container/blob/path?query
+ * and Azurite URLs like http://127.0.0.1:10000/devstoreaccount1/container/blob/path?query.
+ *
+ * Uses `[^\s]+` to consume the entire URL including entity key parentheses
+ * and quotes (e.g. `MyTable(PartitionKey='x',RowKey='y')`) up to the next
+ * whitespace character.
+ */
+const AZURE_URL_PATTERN =
+  /https?:\/\/[^\s]+\.(blob|queue|table|file)\.core\.windows\.net\/[^\s]*/gi;
+const AZURITE_URL_PATTERN =
+  /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):\d+\/[^\s]*/gi;
+
+/**
+ * Scrub an Azure Storage URL found in an error message.
+ * Keeps scheme + host + resource name, removes everything after.
+ */
+function scrubUrlInMessage(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const segments = parsed.pathname.split("/").filter((s) => s.length > 0);
+
+    // Azurite: first segment is account name, second is resource
+    const hostname = parsed.hostname.toLowerCase();
+    const isAzurite =
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "[::1]" ||
+      hostname.startsWith("127.");
+
+    if (isAzurite) {
+      if (segments.length < 2) return url;
+      return `${parsed.protocol}//${parsed.host}/${segments[0]}/${segments[1]}`;
+    }
+
+    // Production Azure: first segment is resource name
+    if (segments.length < 1) return url;
+    // Strip entity keys from table names
+    let resourceName = segments[0];
+    const parenIdx = resourceName.indexOf("(");
+    if (parenIdx > 0) resourceName = resourceName.slice(0, parenIdx);
+    return `${parsed.protocol}//${parsed.host}/${resourceName}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Strip SAS signatures, sensitive query parameters, and Azure Storage
+ * blob paths from a message.
  *
  * Matches `param=value` patterns in query strings and replaces the value
- * portion with `<redacted>`. Preserves the rest of the message content.
+ * portion with `<redacted>`. Also scrubs Azure Storage URLs to remove
+ * blob paths, file paths, entity keys, and query strings.
  *
- * @param message - Raw error message that may contain SAS URLs.
+ * @param message - Raw error message that may contain SAS URLs or blob paths.
  * @returns Sanitised message with sensitive values removed.
  */
 export function sanitizeMessage(message: string): string {
   let result = message;
+
+  // Scrub Azure Storage URLs (remove paths beyond resource name)
+  result = result.replace(AZURE_URL_PATTERN, scrubUrlInMessage);
+  result = result.replace(AZURITE_URL_PATTERN, scrubUrlInMessage);
+
+  // Strip SAS token parameters
   for (const param of SENSITIVE_PARAMS) {
     // Match the param name (case-insensitive) followed by = and its value
     // Value ends at & (next param), space, quote, end of string, or closing paren

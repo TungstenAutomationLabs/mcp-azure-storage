@@ -21,6 +21,7 @@ const mockBlobSetMetadata = vi.fn();
 const mockGetProperties = vi.fn();
 const mockSetAccessTier = vi.fn();
 const mockWithVersion = vi.fn();
+const mockDeleteBlobs = vi.fn();
 
 vi.mock("@azure/storage-blob", () => {
   // Factory that creates a blob client with version support
@@ -64,8 +65,15 @@ vi.mock("@azure/storage-blob", () => {
         delete: mockDelete,
         listBlobsFlat: mockListBlobsFlat,
         getBlockBlobClient: vi.fn().mockImplementation(() => createBlockBlobClient()),
-        getBlobClient: vi.fn().mockImplementation(() => createBlobClient()),
+        getBlobClient: vi.fn().mockImplementation((name: string) => {
+          const client = createBlobClient();
+          (client as any).url = `https://devstoreaccount1.blob.core.windows.net/test/${name}`;
+          return client;
+        }),
       }; }),
+      getBlobBatchClient: vi.fn().mockImplementation(() => ({
+        deleteBlobs: mockDeleteBlobs,
+      })),
     }; }),
     generateBlobSASQueryParameters: vi.fn().mockReturnValue({
       toString: () => "sv=2023-01-01&sig=fakesig&spr=https",
@@ -105,6 +113,7 @@ import {
 import { registerBlobTools } from "../../src/tools/blob-tools.js";
 import { _resetConfigForTesting } from "../../src/config.js";
 import { generateBlobSASQueryParameters } from "@azure/storage-blob";
+import { KNOWN_TOOLS } from "../../src/utils/metrics.js";
 
 function createBlobTestApp() {
   return createTestApp((server) => registerBlobTools(server));
@@ -116,18 +125,20 @@ describe("blob-tools", () => {
   });
 
   describe("tool registration", () => {
-    it("registers 13 blob tools", async () => {
+    it("registers 14 blob tools", async () => {
       const app = createBlobTestApp();
       const res = await mcpPost(app, toolListRequest()).expect(200);
 
       const tools = extractToolsList(res);
-      expect(tools.length).toBe(13);
+      expect(tools.length).toBe(14);
 
       const names = tools.map((t: any) => t.name);
       expect(names).toContain("blob-container-create");
       expect(names).toContain("blob-read");
       expect(names).toContain("blob-create");
       expect(names).toContain("blob-head");
+      expect(names).toContain("blob-delete");
+      expect(names).toContain("blob-delete-batch");
       expect(names).toContain("blob-set-tier");
       expect(names).toContain("blob-get-sas-url");
       expect(names).toContain("blob-upload-from-url");
@@ -1376,6 +1387,106 @@ describe("blob-tools", () => {
 
       const text = extractToolText(res);
       expect(text).toContain("Blocked URL scheme");
+    });
+  });
+
+  describe("blob-delete-batch", () => {
+    it("returns expected result shape for batch delete", async () => {
+      mockDeleteBlobs.mockResolvedValue({
+        subResponses: [
+          { status: 202, statusMessage: "Accepted", errorCode: undefined },
+          { status: 202, statusMessage: "Accepted", errorCode: undefined },
+          { status: 404, statusMessage: "BlobNotFound", errorCode: "BlobNotFound" },
+        ],
+        subResponsesSucceededCount: 2,
+        subResponsesFailedCount: 1,
+      });
+
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-delete-batch", {
+          containerName: "test",
+          blobNames: ["a.txt", "b.txt", "missing.txt"],
+        })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data.container).toBe("test");
+      expect(data.total).toBe(3);
+      expect(data.deleted).toBe(2);
+      expect(data.notFound).toBe(1);
+      expect(data.failed).toBe(0);
+      expect(data.results).toHaveLength(3);
+      expect(data.results[0]).toEqual({ blob: "a.txt", status: 202, outcome: "deleted" });
+      expect(data.results[2]).toEqual({ blob: "missing.txt", status: 404, outcome: "not_found" });
+    });
+
+    it("reports per-blob failures with status codes", async () => {
+      mockDeleteBlobs.mockResolvedValue({
+        subResponses: [
+          { status: 202, statusMessage: "Accepted", errorCode: undefined },
+          { status: 429, statusMessage: "Too Many Requests", errorCode: "ServerBusy" },
+          { status: 503, statusMessage: "Service Unavailable", errorCode: "ServerBusy" },
+        ],
+        subResponsesSucceededCount: 1,
+        subResponsesFailedCount: 2,
+      });
+
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-delete-batch", {
+          containerName: "test",
+          blobNames: ["ok.txt", "throttled.txt", "unavailable.txt"],
+        })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data.deleted).toBe(1);
+      expect(data.failed).toBe(2);
+      expect(data.results[1].outcome).toBe("failed");
+      expect(data.results[1].status).toBe(429);
+      expect(data.results[1].error).toBeDefined();
+      expect(data.results[2].outcome).toBe("failed");
+      expect(data.results[2].status).toBe(503);
+    });
+
+    it("rejects list over 256 blobs (Zod validation)", async () => {
+      const app = createBlobTestApp();
+      const tooMany = Array.from({ length: 257 }, (_, i) => `blob-${i}.txt`);
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-delete-batch", {
+          containerName: "test",
+          blobNames: tooMany,
+        })
+      ).expect(200);
+
+      const text = extractToolText(res);
+      // Zod should reject with a validation error about array length
+      expect(text).toBeTruthy();
+      expect(mockDeleteBlobs).not.toHaveBeenCalled();
+    });
+
+    it("rejects empty blob list (min 1)", async () => {
+      const app = createBlobTestApp();
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-delete-batch", {
+          containerName: "test",
+          blobNames: [],
+        })
+      ).expect(200);
+
+      const text = extractToolText(res);
+      // Zod should reject with a validation error about minimum length
+      expect(text).toBeTruthy();
+      expect(mockDeleteBlobs).not.toHaveBeenCalled();
+    });
+
+    it("is in KNOWN_TOOLS", () => {
+      expect(KNOWN_TOOLS.has("blob-delete-batch")).toBe(true);
     });
   });
 });

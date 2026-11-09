@@ -145,13 +145,15 @@ describe("structured-errors", () => {
   // ── Unit tests for sanitizeMessage ───────────────────────────────────────
 
   describe("sanitizeMessage", () => {
-    it("strips sig parameter from SAS URLs", () => {
+    it("strips Azure Storage URLs down to scheme + host + resource name", () => {
       const msg =
         "Failed for https://account.blob.core.windows.net/container?sv=2023&sig=abc123secret&se=2025-01-01";
       const result = sanitizeMessage(msg);
-      expect(result).toContain("sig=<redacted>");
-      expect(result).toContain("se=<redacted>");
+      // URL scrubbing removes the entire query (more secure than per-param redaction)
       expect(result).not.toContain("abc123secret");
+      expect(result).not.toContain("sv=2023");
+      expect(result).not.toContain("se=2025");
+      expect(result).toContain("https://account.blob.core.windows.net/container");
     });
 
     it("strips sp, sr, sk params", () => {
@@ -405,8 +407,9 @@ describe("structured-errors", () => {
         code: "InternalError",
       });
       const result = mapRestError(err);
+      // URL scrubbing removes the entire query string (more secure than redacting individual params)
       expect(result.message).not.toContain("SECRETKEY123");
-      expect(result.message).toContain("sig=<redacted>");
+      expect(result.message).not.toContain("2025-01-01");
     });
 
     it("prefers details.code over top-level code", () => {
@@ -589,10 +592,11 @@ describe("structured-errors", () => {
 
       const res = await mcpPost(app, toolCallRequest("test-tool")).expect(200);
       const structured = extractStructuredError(res);
+      // URL scrubbing removes the entire query string (more secure than redacting individual params)
       expect(structured.message).not.toContain("TOP_SECRET_SIG");
-      expect(structured.message).toContain("sig=<redacted>");
-      expect(structured.message).toContain("se=<redacted>");
-      expect(structured.message).toContain("sp=<redacted>");
+      expect(structured.message).not.toContain("2025-12-31");
+      // The URL is truncated to scheme + host + resource name only
+      expect(structured.message).toContain("https://acct.blob.core.windows.net/c");
     });
   });
 

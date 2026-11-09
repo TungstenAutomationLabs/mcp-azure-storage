@@ -10,9 +10,18 @@
  *
  * Telemetry level control via OTEL_TELEMETRY_LEVEL:
  *   off      -- same as not setting the endpoint
- *   basic    -- 10% trace sampling, 60s metrics, WARN+ logs
- *   detailed -- 100% trace sampling, 15s metrics, INFO+ logs (default)
+ *   basic    -- 10% trace sampling, 60s metrics, WARN+ logs (default)
+ *   detailed -- 100% trace sampling, 15s metrics, INFO+ logs
  *   full     -- always_on sampler, 5s metrics, no log filter
+ *
+ * PII scrubbing (v1.4.0+):
+ *   Outbound HTTP spans to Azure Storage have their URL attributes
+ *   scrubbed to keep only scheme + host + resource name (container,
+ *   queue, table, or share). Blob paths, file paths, entity keys,
+ *   message IDs, and query strings are removed entirely.
+ *
+ *   When OTEL_SCRUB_HMAC_KEY is set, resource names are HMAC'd with
+ *   that key for correlation without revealing names to the backend.
  *
  * @module instrumentation
  */
@@ -28,7 +37,7 @@ if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
 
 // -- Telemetry level ----------------------------------------------------------
 
-const level = (process.env.OTEL_TELEMETRY_LEVEL || 'basic').toLowerCase();
+var level = (process.env.OTEL_TELEMETRY_LEVEL || 'basic').toLowerCase();
 
 if (level === 'off') {
   // Explicitly disabled -- exit with zero overhead.
@@ -37,7 +46,7 @@ if (level === 'off') {
 
 // -- Level presets -------------------------------------------------------------
 
-const LEVEL_PRESETS = {
+var LEVEL_PRESETS = {
   basic: {
     samplerArg: '0.1',
     metricsIntervalMs: 60000,
@@ -55,15 +64,15 @@ const LEVEL_PRESETS = {
   },
 };
 
-const preset = LEVEL_PRESETS[level] || LEVEL_PRESETS.basic;
+var preset = LEVEL_PRESETS[level] || LEVEL_PRESETS.basic;
 
 // Allow individual overrides via environment variables.
-const samplerArg = process.env.OTEL_TRACES_SAMPLER_ARG || preset.samplerArg;
-const metricsIntervalMs = parseInt(
+var samplerArg = process.env.OTEL_TRACES_SAMPLER_ARG || preset.samplerArg;
+var metricsIntervalMs = parseInt(
   process.env.OTEL_METRICS_EXPORT_INTERVAL_MS || String(preset.metricsIntervalMs),
   10
 );
-const logMinSeverity = process.env.OTEL_LOG_MIN_SEVERITY || preset.logMinSeverity;
+var logMinSeverity = process.env.OTEL_LOG_MIN_SEVERITY || preset.logMinSeverity;
 
 // -- Required for Azure Monitor -----------------------------------------------
 
@@ -73,95 +82,190 @@ if (!process.env.OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE) {
 
 // -- Imports ------------------------------------------------------------------
 
-const { NodeSDK } = require('@opentelemetry/sdk-node');
-const { resourceFromAttributes } = require('@opentelemetry/resources');
-const { ATTR_SERVICE_NAME } = require('@opentelemetry/semantic-conventions');
-const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-http');
-const { OTLPMetricExporter } = require('@opentelemetry/exporter-metrics-otlp-http');
-const { OTLPLogExporter } = require('@opentelemetry/exporter-logs-otlp-http');
-const { PeriodicExportingMetricReader } = require('@opentelemetry/sdk-metrics');
-const { BatchLogRecordProcessor } = require('@opentelemetry/sdk-logs');
-const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
-const { sessionAttributes } = require('./session-attributes.cjs');
-const crypto = require('crypto');
+var NodeSDK = require('@opentelemetry/sdk-node').NodeSDK;
+var resourceFromAttributes = require('@opentelemetry/resources').resourceFromAttributes;
+var ATTR_SERVICE_NAME = require('@opentelemetry/semantic-conventions').ATTR_SERVICE_NAME;
+var OTLPTraceExporter = require('@opentelemetry/exporter-trace-otlp-http').OTLPTraceExporter;
+var OTLPMetricExporter = require('@opentelemetry/exporter-metrics-otlp-http').OTLPMetricExporter;
+var OTLPLogExporter = require('@opentelemetry/exporter-logs-otlp-http').OTLPLogExporter;
+var PeriodicExportingMetricReader = require('@opentelemetry/sdk-metrics').PeriodicExportingMetricReader;
+var BatchLogRecordProcessor = require('@opentelemetry/sdk-logs').BatchLogRecordProcessor;
+var getNodeAutoInstrumentations = require('@opentelemetry/auto-instrumentations-node').getNodeAutoInstrumentations;
+var sessionAttributes = require('./session-attributes.cjs').sessionAttributes;
+var crypto = require('crypto');
 
-// ── PII scrubbing for outbound HTTP spans ────────────────────────────────────
-// Mirrors the logic in src/utils/pii-scrubber.ts but in plain CJS so it can
-// be used at instrumentation load time (before ESM modules are available).
+// -- PII scrubbing for outbound HTTP spans ------------------------------------
+// Removes blob paths, file paths, entity keys, message IDs, and query strings
+// from Azure Storage URLs in span attributes. Keeps only scheme + host +
+// resource name (container/queue/table/share).
+//
 // Controlled by OTEL_SCRUB_PII env var (default: true).
+// When OTEL_SCRUB_HMAC_KEY is set, resource names are HMAC'd.
 
-const HASH_PREFIX_LEN = 8;
+var REDACTED = '[redacted]';
+var HMAC_PREFIX_LEN = 16;
 
 function isPiiScrubEnabled() {
   var raw = (process.env.OTEL_SCRUB_PII || 'true').toLowerCase().trim();
   return raw !== 'false' && raw !== '0';
 }
 
-function hashSeg(value) {
-  return crypto
-    .createHash('sha256')
-    .update(value)
-    .digest('hex')
-    .slice(0, HASH_PREFIX_LEN);
+function getHmacKey() {
+  var key = process.env.OTEL_SCRUB_HMAC_KEY;
+  return key && key.length > 0 ? key : null;
 }
 
-function scrubBlobPath(blobPath) {
-  if (!blobPath) return blobPath;
-  var segments = blobPath.split('/').filter(function (s) { return s.length > 0; });
-  var scrubbed = segments.map(function (seg) {
-    var dotIdx = seg.lastIndexOf('.');
-    if (dotIdx > 0 && dotIdx < seg.length - 1) {
-      return hashSeg(seg.slice(0, dotIdx)) + seg.slice(dotIdx);
-    }
-    return hashSeg(seg);
-  });
-  return scrubbed.join('/');
+function hmacValue(value, key) {
+  return crypto
+    .createHmac('sha256', key)
+    .update(value)
+    .digest('hex')
+    .slice(0, HMAC_PREFIX_LEN);
 }
 
 /**
- * Scrub Azure Storage URLs in outbound HTTP span attributes.
+ * Identify Azure Storage service type from hostname.
+ * Returns 'blob', 'queue', 'table', 'file', or null.
+ */
+function identifyService(hostname) {
+  if (hostname.indexOf('.blob.core.windows.net') !== -1) return 'blob';
+  if (hostname.indexOf('.queue.core.windows.net') !== -1) return 'queue';
+  if (hostname.indexOf('.table.core.windows.net') !== -1) return 'table';
+  if (hostname.indexOf('.file.core.windows.net') !== -1) return 'file';
+  return null;
+}
+
+/**
+ * Check whether hostname is an Azurite emulator.
+ */
+function isAzuriteHost(hostname) {
+  var h = hostname.toLowerCase();
+  return (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '[::1]' ||
+    h.indexOf('127.') === 0
+  );
+}
+
+/**
+ * Strip table entity key parentheses from a path segment.
+ * E.g. "TableName(PartitionKey='x',RowKey='y')" -> "TableName"
+ */
+function stripEntityKeys(segment) {
+  var idx = segment.indexOf('(');
+  if (idx > 0) return segment.slice(0, idx);
+  return segment;
+}
+
+/**
+ * Optionally HMAC a resource name based on OTEL_SCRUB_HMAC_KEY.
+ */
+function maybeHmacName(name) {
+  var key = getHmacKey();
+  return key ? hmacValue(name, key) : name;
+}
+
+/**
+ * Scrub an Azure Storage URL, keeping only scheme + host + resource name.
+ * Removes blob paths, file paths, entity keys, queries -- everything after
+ * the resource name (container/queue/table/share).
  *
- * Detects URLs targeting *.blob.core.windows.net and replaces the
- * blob path with hashed segments to prevent PII leakage.
+ * Supports all four Azure services and Azurite emulator URLs.
+ * Non-Azure URLs are returned unchanged.
  */
 function scrubStorageUrl(url) {
   if (!url || !isPiiScrubEnabled()) return url;
-  // Match: https://<account>.blob.core.windows.net/<container>/<blobPath>?<query>
-  var match = url.match(
-    /^(https?:\/\/[^/]+\.blob\.core\.windows\.net\/)([^/?]+)(\/[^?]*)(\?.*)?$/
-  );
-  if (match) {
-    var prefix = match[1];
-    var container = match[2];
-    var path = match[3]; // starts with "/"
-    var query = match[4] || '';
-    return prefix + hashSeg(container) + '/' + scrubBlobPath(path.slice(1)) + query;
+
+  var parsed;
+  try {
+    parsed = new URL(url);
+  } catch (e) {
+    return url;
   }
-  return url;
+
+  var hostname = parsed.hostname;
+  var serviceType = identifyService(hostname);
+  var azurite = isAzuriteHost(hostname);
+
+  if (!serviceType && !azurite) return url;
+
+  var segments = parsed.pathname.split('/').filter(function (s) { return s.length > 0; });
+  var prefix = parsed.protocol + '//' + parsed.host;
+
+  if (azurite) {
+    if (segments.length < 2) {
+      return prefix + '/' + (segments[0] || '');
+    }
+    var accountName = segments[0];
+    var resourceName = stripEntityKeys(segments[1]);
+    return prefix + '/' + accountName + '/' + maybeHmacName(resourceName);
+  }
+
+  if (segments.length < 1) return prefix;
+  var resName = stripEntityKeys(segments[0]);
+  return prefix + '/' + maybeHmacName(resName);
+}
+
+/**
+ * Scrub a URL path, keeping only the first path segment (resource name).
+ * Used for url.path / http.target attributes.
+ */
+function scrubStoragePath(path, hostname) {
+  if (!path) return path;
+
+  var serviceType = identifyService(hostname || '');
+  var azurite = isAzuriteHost(hostname || '');
+
+  if (!serviceType && !azurite) return path;
+
+  var segments = path.split('/').filter(function (s) { return s.length > 0; });
+
+  if (azurite) {
+    if (segments.length < 2) return path;
+    var accountName = segments[0];
+    var resourceName = stripEntityKeys(segments[1]);
+    return '/' + accountName + '/' + maybeHmacName(resourceName);
+  }
+
+  if (segments.length < 1) return path;
+  var resName = stripEntityKeys(segments[0]);
+  return '/' + maybeHmacName(resName);
+}
+
+/**
+ * Extract hostname from a URL string. Returns empty string on parse failure.
+ */
+function extractHostname(url) {
+  try {
+    return new URL(url).hostname;
+  } catch (e) {
+    return '';
+  }
 }
 
 // -- Severity number mapping for log filtering --------------------------------
 
-const SEVERITY_MAP = {
+var SEVERITY_MAP = {
   DEBUG: 5,
   INFO: 9,
   WARN: 13,
   ERROR: 17,
 };
 
-const minSeverityNumber = logMinSeverity ? (SEVERITY_MAP[logMinSeverity.toUpperCase()] || 0) : 0;
+var minSeverityNumber = logMinSeverity ? (SEVERITY_MAP[logMinSeverity.toUpperCase()] || 0) : 0;
 
 // -- Exporters ----------------------------------------------------------------
 
-const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+var endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
 
-const traceExporter = new OTLPTraceExporter({ url: endpoint + '/v1/traces' });
-const metricExporter = new OTLPMetricExporter({ url: endpoint + '/v1/metrics' });
-const logExporter = new OTLPLogExporter({ url: endpoint + '/v1/logs' });
+var traceExporter = new OTLPTraceExporter({ url: endpoint + '/v1/traces' });
+var metricExporter = new OTLPMetricExporter({ url: endpoint + '/v1/metrics' });
+var logExporter = new OTLPLogExporter({ url: endpoint + '/v1/logs' });
 
 // -- Metric reader ------------------------------------------------------------
 
-const metricReader = new PeriodicExportingMetricReader({
+var metricReader = new PeriodicExportingMetricReader({
   exporter: metricExporter,
   exportIntervalMillis: metricsIntervalMs,
 });
@@ -169,43 +273,71 @@ const metricReader = new PeriodicExportingMetricReader({
 // -- Log processor ------------------------------------------------------------
 // CRITICAL: BatchLogRecordProcessor takes an OPTIONS OBJECT, not positional args.
 
-const logRecordProcessor = new BatchLogRecordProcessor({ exporter: logExporter });
+var logRecordProcessor = new BatchLogRecordProcessor({ exporter: logExporter });
 
 // -- Auto-instrumentations ----------------------------------------------------
 
-const instrumentations = getNodeAutoInstrumentations({
+var instrumentations = getNodeAutoInstrumentations({
   // fs instrumentation is too noisy -- disable it.
   '@opentelemetry/instrumentation-fs': { enabled: false },
-  // Attach session attributes to incoming HTTP spans.
-  // PII scrubbing: outbound HTTP spans to Azure Storage contain blob
-  // names in url.full / http.url attributes. The applyCustomAttributesOnSpan
-  // hook scrubs these URLs after the span is created, replacing blob paths
-  // with SHA-256 hashes. Controlled by OTEL_SCRUB_PII env var.
+  // PII scrubbing: outbound HTTP spans to Azure Storage have their URL
+  // attributes scrubbed to remove blob paths, file paths, entity keys,
+  // and query strings. Only scheme + host + resource name is kept.
+  // Incoming spans get session attributes attached.
   '@opentelemetry/instrumentation-http': {
     startIncomingSpanHook: function (request) {
       return sessionAttributes(request);
     },
     applyCustomAttributesOnSpan: function (span) {
       if (!isPiiScrubEnabled()) return;
+
+      // Determine the hostname from url.full or http.url for path scrubbing
+      var hostname = '';
+
       // Scrub URL attributes that may contain blob names / PII.
-      // The OTel HTTP instrumentation sets these as span attributes.
-      var urlAttrs = ['url.full', 'http.url', 'http.target'];
-      for (var i = 0; i < urlAttrs.length; i++) {
-        var attr = urlAttrs[i];
-        // Span attributes are read-only via public API, but we can
-        // overwrite by calling setAttribute again with the scrubbed value.
-        // The span object from the callback exposes the attributes object.
-        try {
-          var attrs = span.attributes;
-          if (attrs && typeof attrs[attr] === 'string') {
+      var fullUrlAttrs = ['url.full', 'http.url'];
+      var pathAttrs = ['url.path', 'http.target'];
+      var queryAttr = 'url.query';
+
+      try {
+        var attrs = span.attributes;
+        if (!attrs) return;
+
+        // First pass: scrub full URLs and extract hostname
+        for (var i = 0; i < fullUrlAttrs.length; i++) {
+          var attr = fullUrlAttrs[i];
+          if (typeof attrs[attr] === 'string') {
+            if (!hostname) {
+              hostname = extractHostname(attrs[attr]);
+            }
             var scrubbed = scrubStorageUrl(attrs[attr]);
             if (scrubbed !== attrs[attr]) {
               span.setAttribute(attr, scrubbed);
             }
           }
-        } catch (e) {
-          // Swallow -- never break instrumentation for scrubbing errors.
         }
+
+        // Second pass: scrub path attributes
+        if (hostname) {
+          for (var j = 0; j < pathAttrs.length; j++) {
+            var pAttr = pathAttrs[j];
+            if (typeof attrs[pAttr] === 'string') {
+              var scrubbedPath = scrubStoragePath(attrs[pAttr], hostname);
+              if (scrubbedPath !== attrs[pAttr]) {
+                span.setAttribute(pAttr, scrubbedPath);
+              }
+            }
+          }
+        }
+
+        // Remove query string entirely for Azure Storage URLs
+        if (hostname && (identifyService(hostname) || isAzuriteHost(hostname))) {
+          if (typeof attrs[queryAttr] === 'string' && attrs[queryAttr].length > 0) {
+            span.setAttribute(queryAttr, '');
+          }
+        }
+      } catch (e) {
+        // Swallow -- never break instrumentation for scrubbing errors.
       }
     },
   },
@@ -231,17 +363,17 @@ if (level === 'full') {
 
 // -- Resource -----------------------------------------------------------------
 
-const serviceName = process.env.OTEL_SERVICE_NAME || 'mcp-azure-storage';
-const replicaName = process.env.CONTAINER_APP_REPLICA_NAME || 'local';
+var serviceName = process.env.OTEL_SERVICE_NAME || 'mcp-azure-storage';
+var replicaName = process.env.CONTAINER_APP_REPLICA_NAME || 'local';
 
-const resource = resourceFromAttributes({
+var resource = resourceFromAttributes({
   [ATTR_SERVICE_NAME]: serviceName,
   'container_app.replica.name': replicaName,
 });
 
 // -- SDK initialisation -------------------------------------------------------
 
-const sdk = new NodeSDK({
+var sdk = new NodeSDK({
   resource: resource,
   traceExporter: traceExporter,
   metricReader: metricReader,

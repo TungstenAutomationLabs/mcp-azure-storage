@@ -91,9 +91,9 @@ describe("metrics utility", () => {
       expect(KNOWN_TOOLS.has("store-info")).toBe(true);
     });
 
-    it("has exactly 42 known tools", () => {
-      // 13 + 8 + 8 + 5 + 8 = 42
-      expect(KNOWN_TOOLS.size).toBe(42);
+    it("has exactly 43 known tools", () => {
+      // 14 + 8 + 8 + 5 + 8 = 43
+      expect(KNOWN_TOOLS.size).toBe(43);
     });
   });
 

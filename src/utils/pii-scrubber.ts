@@ -2,26 +2,36 @@
  * PII scrubber for OpenTelemetry span attributes and log messages.
  *
  * Prevents personally identifiable information (PII) from leaking into
- * telemetry data. Blob names and container names often contain personal
- * information (e.g. `john-doe-passport.pdf`, `patient-records/smith.csv`).
+ * telemetry data. Blob names, file paths, entity keys, and query strings
+ * often contain personal information (e.g. `john-doe-passport.pdf`,
+ * `patient-records/smith.csv`).
  *
- * Scrubbing strategy:
- *  - Each path segment and the filename stem are replaced with a truncated
- *    SHA-256 hash (first 8 hex characters).
- *  - File extensions are preserved (they carry no PII but aid debugging).
- *  - Virtual directory structure is preserved (segment count / depth).
- *  - Container names are hashed per-segment (split on `-`).
+ * Scrubbing strategy (v1.4.0+):
+ *  - Blob names, file paths, entity keys, and queries are **removed**
+ *    entirely (replaced with a fixed placeholder or omitted).
+ *  - Container / queue / table / share names are kept in plain text by
+ *    default (they are operator-chosen, not user-supplied PII).
+ *  - When `OTEL_SCRUB_HMAC_KEY` is set, resource names (container, queue,
+ *    table, share) are HMAC'd with that key for correlation without
+ *    revealing the name to the telemetry backend.
  *
  * Activation: controlled by `OTEL_SCRUB_PII` environment variable.
- *  - `true` (default in production) -- scrubbing enabled
+ *  - `true` (default) -- scrubbing enabled
  *  - `false` -- scrubbing disabled, attributes set verbatim
+ *
+ * HMAC correlation: controlled by `OTEL_SCRUB_HMAC_KEY` environment variable.
+ *  - When set, resource names are HMAC'd with this key.
+ *  - When unset, resource names are kept in plain text.
  *
  * @module utils/pii-scrubber
  */
 
 import crypto from "crypto";
 
-// ── Configuration ────────────────────────────────────────────────────────────
+// -- Configuration ------------------------------------------------------------
+
+/** Placeholder used when a PII segment is removed. */
+export const REDACTED_PLACEHOLDER = "[redacted]";
 
 /** Check whether PII scrubbing is enabled. Defaults to true. */
 export function isPiiScrubEnabled(): boolean {
@@ -29,136 +39,269 @@ export function isPiiScrubEnabled(): boolean {
   return raw !== "false" && raw !== "0";
 }
 
-// ── Core hashing ─────────────────────────────────────────────────────────────
-
-/** Hash length in hex characters (8 hex = 4 bytes = ~4 billion values). */
-const HASH_PREFIX_LENGTH = 8;
-
 /**
- * Produce a short, deterministic, irreversible hash of the input string.
- *
- * Uses SHA-256 truncated to 8 hex characters. The same input always
- * produces the same output, which aids debugging while preventing PII
- * from being recoverable.
- *
- * @param value - The raw string to hash.
- * @returns An 8-character hex digest.
+ * Return the HMAC key for resource name correlation, or null if not set.
+ * When set, container/queue/table/share names are HMAC'd instead of
+ * being passed in plain text.
  */
-export function hashSegment(value: string): string {
-  return crypto
-    .createHash("sha256")
-    .update(value)
-    .digest("hex")
-    .slice(0, HASH_PREFIX_LENGTH);
+export function getHmacKey(): string | null {
+  const key = process.env.OTEL_SCRUB_HMAC_KEY;
+  return key && key.length > 0 ? key : null;
 }
 
-// ── Blob name scrubbing ──────────────────────────────────────────────────────
+// -- HMAC ---------------------------------------------------------------------
+
+/** HMAC output length in hex characters. */
+const HMAC_PREFIX_LENGTH = 16;
+
+/**
+ * Produce a short, deterministic HMAC of the input string using the
+ * provided key. Used for correlation values that need to link spans
+ * to specific resources without revealing the resource name.
+ *
+ * @param value - The raw string to HMAC.
+ * @param key - The HMAC secret key.
+ * @returns A 16-character hex HMAC digest.
+ */
+export function hmacValue(value: string, key: string): string {
+  return crypto
+    .createHmac("sha256", key)
+    .update(value)
+    .digest("hex")
+    .slice(0, HMAC_PREFIX_LENGTH);
+}
+
+// -- Legacy: hashSegment (deprecated) -----------------------------------------
+
+/**
+ * @deprecated Since v1.4.0 -- replaced by removal. Returns `[redacted]`
+ * regardless of input. Kept for API compatibility with existing callers
+ * that have not yet migrated.
+ *
+ * @param _value - Ignored.
+ * @returns The fixed placeholder `[redacted]`.
+ */
+export function hashSegment(_value: string): string {
+  return REDACTED_PLACEHOLDER;
+}
+
+// -- Blob name scrubbing ------------------------------------------------------
 
 /**
  * Scrub a blob name (path) for safe inclusion in OTel span attributes.
  *
- * Preserves virtual directory structure and file extension while hashing
- * each path segment and the filename stem.
- *
- * @example
- *   scrubBlobName("clients/john-doe/passport-scan.pdf")
- *   // => "a1b2c3d4/e5f6a7b8/9c0d1e2f.pdf"
- *
- *   scrubBlobName("report.csv")
- *   // => "3f4a5b6c.csv"
- *
- *   scrubBlobName("data/archive/")
- *   // => "7d8e9f0a/1b2c3d4e/"
+ * Returns a fixed placeholder regardless of path depth. No structural
+ * information (segment count, file extensions) is preserved.
  *
  * @param name - The raw blob name (may include virtual directory path).
- * @returns The scrubbed blob name with hashed segments.
+ * @returns The fixed placeholder `[redacted]`, or the original if empty.
  */
 export function scrubBlobName(name: string): string {
   if (!name) return name;
-
-  // Preserve trailing slash (directory marker)
-  const trailingSlash = name.endsWith("/");
-
-  const segments = name.split("/").filter((s) => s.length > 0);
-  const scrubbed = segments.map((segment) => {
-    // Split filename from extension for the last segment
-    const dotIndex = segment.lastIndexOf(".");
-    if (dotIndex > 0 && dotIndex < segment.length - 1) {
-      const stem = segment.slice(0, dotIndex);
-      const ext = segment.slice(dotIndex); // includes the dot
-      return hashSegment(stem) + ext;
-    }
-    return hashSegment(segment);
-  });
-
-  return scrubbed.join("/") + (trailingSlash ? "/" : "");
+  return REDACTED_PLACEHOLDER;
 }
 
-// ── Container name scrubbing ─────────────────────────────────────────────────
+// -- Resource name scrubbing --------------------------------------------------
 
 /**
- * Scrub a container name for safe inclusion in OTel span attributes.
+ * Scrub a resource name (container, queue, table, or share) for safe
+ * inclusion in OTel span attributes.
  *
- * Container names are restricted to `[a-z0-9-]` so PII risk is lower,
- * but they could still contain identifiers (e.g. `client-12345`).
- * The entire name is hashed as a single unit.
+ * By default, resource names are kept in plain text because they are
+ * operator-chosen identifiers, not user-supplied PII. When
+ * `OTEL_SCRUB_HMAC_KEY` is set, the name is HMAC'd for correlation.
  *
- * @param name - The raw container name.
- * @returns The hashed container name.
+ * @param name - The raw resource name.
+ * @returns The name in plain text or HMAC'd, depending on configuration.
  */
 export function scrubContainerName(name: string): string {
   if (!name) return name;
-  return hashSegment(name);
+  const hmacKey = getHmacKey();
+  if (hmacKey) {
+    return hmacValue(name, hmacKey);
+  }
+  return name;
 }
 
-// ── URL scrubbing ────────────────────────────────────────────────────────────
+// -- URL scrubbing ------------------------------------------------------------
 
 /**
- * Scrub an Azure Storage URL to remove PII from the blob path.
+ * Azure Storage service type, identified from the URL hostname.
+ */
+type AzureServiceType = "blob" | "queue" | "table" | "file" | null;
+
+/**
+ * Identify which Azure Storage service a hostname targets.
  *
- * Detects URLs targeting `*.blob.core.windows.net` and replaces the
- * blob path (everything after the container name) with hashed segments.
- * The host, container name, and query parameters (SAS tokens) are
- * preserved, though the container name is also scrubbed.
+ * @param hostname - The URL hostname (e.g. "myaccount.blob.core.windows.net").
+ * @returns The service type, or null if not an Azure Storage URL.
+ */
+function identifyAzureService(hostname: string): AzureServiceType {
+  if (hostname.includes(".blob.core.windows.net")) return "blob";
+  if (hostname.includes(".queue.core.windows.net")) return "queue";
+  if (hostname.includes(".table.core.windows.net")) return "table";
+  if (hostname.includes(".file.core.windows.net")) return "file";
+  return null;
+}
+
+/**
+ * Check whether a URL targets an Azurite emulator.
+ * Azurite uses localhost/127.0.0.1/[::1] with a port and prefixes
+ * paths with `devstoreaccount1` (or other account names).
+ *
+ * @param hostname - The URL hostname.
+ * @returns True if the URL appears to target Azurite.
+ */
+function isAzuriteHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return (
+    h === "localhost" ||
+    h === "127.0.0.1" ||
+    h === "[::1]" ||
+    h.startsWith("127.")
+  );
+}
+
+/**
+ * Strip entity key parentheses from a table name.
+ * Table URLs may include entity keys like `TableName(PartitionKey='...',RowKey='...')`.
+ *
+ * @param segment - A path segment that may contain entity keys.
+ * @returns The segment with parenthesised content removed.
+ */
+function stripEntityKeys(segment: string): string {
+  const parenIdx = segment.indexOf("(");
+  if (parenIdx > 0) {
+    return segment.slice(0, parenIdx);
+  }
+  return segment;
+}
+
+/**
+ * Scrub an Azure Storage URL to remove PII.
+ *
+ * Keeps only scheme + authority + first path segment (the resource name:
+ * container, queue, table, or share). Everything after -- blob paths, file
+ * paths, entity keys, message IDs, query strings -- is removed entirely.
+ *
+ * Supports all four Azure Storage services (blob, queue, table, file)
+ * and Azurite emulator URLs (localhost with account-name prefix).
+ *
+ * When `OTEL_SCRUB_HMAC_KEY` is set, the resource name is HMAC'd.
  *
  * Non-Azure-Storage URLs are returned unchanged.
  *
  * @example
- *   scrubUrl("https://myaccount.blob.core.windows.net/docs/john-doe/passport.pdf?sv=2024...")
- *   // => "https://myaccount.blob.core.windows.net/a1b2c3d4/e5f6a7b8/9c0d1e2f.pdf?sv=2024..."
+ *   scrubUrl("https://acct.blob.core.windows.net/mycontainer/path/to/secret.pdf?sv=...")
+ *   // => "https://acct.blob.core.windows.net/mycontainer"
+ *
+ *   scrubUrl("https://acct.table.core.windows.net/MyTable(PartitionKey='x',RowKey='y')")
+ *   // => "https://acct.table.core.windows.net/MyTable"
  *
  * @param url - The raw URL string.
- * @returns The URL with scrubbed blob path, or the original URL if not
- *          an Azure Storage URL.
+ * @returns The URL with PII removed, or the original if not Azure Storage.
  */
 export function scrubUrl(url: string): string {
   if (!url) return url;
 
-  // Match Azure Blob Storage URLs:
-  //   https://<account>.blob.core.windows.net/<container>/<blobPath>?<query>
-  // Also match Azurite-style URLs:
-  //   http://127.0.0.1:10000/<account>/<container>/<blobPath>
-  const azureBlobPattern =
-    /^(https?:\/\/[^/]+\.blob\.core\.windows\.net\/)([^/?]+)(\/[^?]*)(\?.*)?$/;
-  const azuritePattern =
-    /^(https?:\/\/(?:localhost|127\.0\.0\.1|(?:\[::1\])):\d+\/[^/]+\/)([^/?]+)(\/[^?]*)(\?.*)?$/;
-
-  for (const pattern of [azureBlobPattern, azuritePattern]) {
-    const match = url.match(pattern);
-    if (match) {
-      const [, prefix, container, blobPath, query] = match;
-      const scrubbedContainer = scrubContainerName(container);
-      // blobPath starts with "/" -- remove it, scrub, then re-add
-      const rawPath = blobPath.slice(1);
-      const scrubbedPath = rawPath ? "/" + scrubBlobName(rawPath) : "";
-      return prefix + scrubbedContainer + scrubbedPath + (query || "");
-    }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // Not a valid URL -- return as-is
+    return url;
   }
 
-  return url;
+  const hostname = parsed.hostname;
+
+  // Identify service type from hostname
+  const serviceType = identifyAzureService(hostname);
+  const isAzurite = isAzuriteHost(hostname);
+
+  if (!serviceType && !isAzurite) {
+    // Not an Azure Storage URL -- return unchanged
+    return url;
+  }
+
+  // Split path into segments (filter empty from leading/trailing slashes)
+  const segments = parsed.pathname.split("/").filter((s) => s.length > 0);
+
+  // For Azurite URLs, the first segment is the account name (e.g. "devstoreaccount1"),
+  // and the second segment is the resource name. For production Azure URLs, the
+  // first segment is the resource name directly.
+  let resourceName: string;
+  let prefix: string;
+
+  if (isAzurite) {
+    // Azurite: scheme://host:port/accountName/resourceName/...
+    if (segments.length < 2) {
+      // Only account name, no resource -- return origin + account
+      return `${parsed.protocol}//${parsed.host}/${segments[0] || ""}`;
+    }
+    const accountName = segments[0];
+    resourceName = stripEntityKeys(segments[1]);
+    prefix = `${parsed.protocol}//${parsed.host}/${accountName}`;
+  } else {
+    // Production Azure: scheme://account.service.core.windows.net/resourceName/...
+    if (segments.length < 1) {
+      // No resource name -- return origin only
+      return `${parsed.protocol}//${parsed.host}`;
+    }
+    resourceName = stripEntityKeys(segments[0]);
+    prefix = `${parsed.protocol}//${parsed.host}`;
+  }
+
+  // Optionally HMAC the resource name
+  const hmacKey = getHmacKey();
+  const scrubbedResourceName = hmacKey
+    ? hmacValue(resourceName, hmacKey)
+    : resourceName;
+
+  // Return scheme + host + resource name only (no further path, no query)
+  return `${prefix}/${scrubbedResourceName}`;
 }
 
-// ── Convenience: conditional scrubbing ───────────────────────────────────────
+// -- Path scrubbing -----------------------------------------------------------
+
+/**
+ * Scrub a URL path for the `url.path` / `http.target` span attribute.
+ *
+ * Returns only the first path segment (resource name) for Azure Storage
+ * URLs, or the full path for non-Azure URLs.
+ *
+ * @param path - The raw URL path (e.g. "/container/blob/path").
+ * @param hostname - The hostname to identify the service type.
+ * @returns The scrubbed path.
+ */
+export function scrubUrlPath(path: string, hostname: string): string {
+  if (!path) return path;
+
+  const serviceType = identifyAzureService(hostname);
+  const isAzurite = isAzuriteHost(hostname);
+
+  if (!serviceType && !isAzurite) {
+    return path;
+  }
+
+  const segments = path.split("/").filter((s) => s.length > 0);
+
+  if (isAzurite) {
+    if (segments.length < 2) return path;
+    const accountName = segments[0];
+    const resourceName = stripEntityKeys(segments[1]);
+    const hmacKey = getHmacKey();
+    const scrubbedName = hmacKey ? hmacValue(resourceName, hmacKey) : resourceName;
+    return `/${accountName}/${scrubbedName}`;
+  }
+
+  if (segments.length < 1) return path;
+  const resourceName = stripEntityKeys(segments[0]);
+  const hmacKey = getHmacKey();
+  const scrubbedName = hmacKey ? hmacValue(resourceName, hmacKey) : resourceName;
+  return `/${scrubbedName}`;
+}
+
+// -- Convenience: conditional scrubbing ---------------------------------------
 
 /**
  * Conditionally scrub a blob name based on the OTEL_SCRUB_PII setting.
@@ -171,7 +314,7 @@ export function maybeScrubBlobName(name: string): string {
 }
 
 /**
- * Conditionally scrub a container name based on the OTEL_SCRUB_PII setting.
+ * Conditionally scrub a container/resource name based on the OTEL_SCRUB_PII setting.
  *
  * @param name - The raw container name.
  * @returns The scrubbed name (if enabled) or the original name.

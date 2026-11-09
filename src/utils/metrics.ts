@@ -20,7 +20,7 @@ import { metrics, type Counter, type Meter } from "@opentelemetry/api";
 
 /** Canonical set of all registered MCP tool names. */
 export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
-  // blob-tools.ts (13 tools)
+  // blob-tools.ts (14 tools)
   "blob-container-create",
   "blob-container-delete",
   "blob-container-exists",
@@ -29,6 +29,7 @@ export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
   "blob-head",
   "blob-read",
   "blob-delete",
+  "blob-delete-batch",
   "blob-set-metadata",
   "blob-set-tier",
   "blob-get-sas-url",

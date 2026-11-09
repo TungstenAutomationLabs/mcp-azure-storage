@@ -1,10 +1,10 @@
 /**
- * Azure Blob Storage MCP tools — 13 tools.
+ * Azure Blob Storage MCP tools — 14 tools.
  *
  * Provides container management (create, delete, exists), blob CRUD
- * (list, create/upload, read/download, delete, head, set-metadata,
- * set-tier), URL-based upload (server-side fetch), and SAS token
- * generation (blob-level and container-level).
+ * (list, create/upload, read/download, delete, delete-batch, head,
+ * set-metadata, set-tier), URL-based upload (server-side fetch), and
+ * SAS token generation (blob-level and container-level).
  *
  * Note: Container listing is provided by the `azure-blob:///containers`
  * MCP resource (see resources/blob-resources.ts).
@@ -41,7 +41,7 @@ import {
 } from "../config.js";
 
 /**
- * Register all 13 Blob Storage tools on the given MCP server.
+ * Register all 14 Blob Storage tools on the given MCP server.
  *
  * Uses a lazy singleton BlobServiceClient that reuses the internal HTTP
  * connection pool across all tool invocations for better performance.
@@ -470,6 +470,98 @@ export function registerBlobTools(server: McpServer): void {
       }
 
       return formatResponse({ success: true, deleted: blobName }, format, "Blob Deleted");
+    }
+  );
+
+  // ──────────────────────────────────────────────────────────────
+  // BATCH DELETE
+  // ──────────────────────────────────────────────────────────────
+
+  server.tool(
+    "blob-delete-batch",
+    "Delete multiple blobs in a single request using the Azure Blob Batch API. " +
+      "Use this instead of 'blob-delete' when you need to delete several blobs efficiently (1-256 per call, " +
+      "the hard limit imposed by the Azure Blob Batch API). " +
+      "Blobs that do not exist are reported as 'not_found' (safe for retries). " +
+      "Per-blob errors (e.g. 429, 503) are reported individually in the results array, not thrown. " +
+      "WARNING: Deletions are irreversible.",
+    {
+      containerName: z
+        .string()
+        .describe("Name of the container holding the blobs (e.g. 'my-data-2024')"),
+      blobNames: z
+        .array(z.string())
+        .min(1)
+        .max(256)
+        .describe("List of blob names to delete (1-256). Each name may include virtual directory paths (e.g. 'reports/2024/q1.pdf')."),
+      deleteSnapshots: z
+        .enum(["include", "only"])
+        .optional()
+        .describe("How to handle snapshots: 'include' deletes the blob and all snapshots, 'only' deletes snapshots but keeps the base blob."),
+      format: formatSchema,
+    },
+    async ({ containerName, blobNames, deleteSnapshots, format }) => {
+      const blobServiceClient = await getBlobServiceClient();
+      const containerClient = blobServiceClient.getContainerClient(containerName);
+      const batchClient = blobServiceClient.getBlobBatchClient();
+      const credential = await getCredential();
+
+      // Build full blob URLs for the batch API
+      const blobUrls = blobNames.map(
+        (name) => containerClient.getBlobClient(name).url
+      );
+
+      const batchResponse = await batchClient.deleteBlobs(
+        blobUrls,
+        credential,
+        deleteSnapshots ? { deleteSnapshots } : {}
+      );
+
+      // Map sub-responses to per-blob results
+      const results: Array<{
+        blob: string;
+        status: number;
+        outcome: "deleted" | "not_found" | "failed";
+        error?: string;
+      }> = [];
+      let deleted = 0;
+      let notFound = 0;
+      let failed = 0;
+
+      for (let i = 0; i < batchResponse.subResponses.length; i++) {
+        const sub = batchResponse.subResponses[i];
+        const blobName = blobNames[i];
+        const status = sub.status;
+
+        if (status >= 200 && status < 300) {
+          results.push({ blob: blobName, status, outcome: "deleted" });
+          deleted++;
+        } else if (status === 404) {
+          results.push({ blob: blobName, status, outcome: "not_found" });
+          notFound++;
+        } else {
+          results.push({
+            blob: blobName,
+            status,
+            outcome: "failed",
+            error: sub.statusMessage || sub.errorCode || "Unknown error",
+          });
+          failed++;
+        }
+      }
+
+      return formatResponse(
+        {
+          container: containerName,
+          total: blobNames.length,
+          deleted,
+          notFound,
+          failed,
+          results,
+        },
+        format,
+        "Batch Delete Results"
+      );
     }
   );
 

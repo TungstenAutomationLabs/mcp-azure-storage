@@ -180,6 +180,118 @@ describe.skipIf(SKIP)("blob-tools integration (Azurite)", () => {
     expect(data.success).toBe(true);
   });
 
+  describe("blob-delete-batch", () => {
+    it("batch deletes multiple blobs", async () => {
+      // Upload 3 blobs
+      for (const name of ["batch-a.txt", "batch-b.txt", "batch-c.txt"]) {
+        const content = Buffer.from(`content of ${name}`).toString("base64");
+        await mcpPost(
+          app,
+          toolCallRequest("blob-create", {
+            containerName,
+            blobName: name,
+            contentBase64: content,
+          })
+        ).expect(200);
+      }
+
+      // Batch delete them all
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-delete-batch", {
+          containerName,
+          blobNames: ["batch-a.txt", "batch-b.txt", "batch-c.txt"],
+        })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data.container).toBe(containerName);
+      expect(data.total).toBe(3);
+      expect(data.deleted).toBe(3);
+      expect(data.notFound).toBe(0);
+      expect(data.failed).toBe(0);
+      expect(data.results).toHaveLength(3);
+
+      // Verify they are gone — list should not contain them
+      const listRes = await mcpPost(
+        app,
+        toolCallRequest("blob-list", {
+          containerName,
+          prefix: "batch-",
+        })
+      ).expect(200);
+      const listed = extractToolJson(listRes);
+      expect(listed).toHaveLength(0);
+    });
+
+    it("handles missing blobs as not_found", async () => {
+      // Upload 2 blobs
+      for (const name of ["exist-1.txt", "exist-2.txt"]) {
+        const content = Buffer.from(`content of ${name}`).toString("base64");
+        await mcpPost(
+          app,
+          toolCallRequest("blob-create", {
+            containerName,
+            blobName: name,
+            contentBase64: content,
+          })
+        ).expect(200);
+      }
+
+      // Batch delete 3 (one does not exist)
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-delete-batch", {
+          containerName,
+          blobNames: ["exist-1.txt", "exist-2.txt", "does-not-exist.txt"],
+        })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data.total).toBe(3);
+      expect(data.deleted).toBe(2);
+      expect(data.notFound).toBe(1);
+      expect(data.failed).toBe(0);
+
+      const notFoundResult = data.results.find(
+        (r: any) => r.blob === "does-not-exist.txt"
+      );
+      expect(notFoundResult).toBeDefined();
+      expect(notFoundResult.outcome).toBe("not_found");
+      expect(notFoundResult.status).toBe(404);
+    });
+
+    it("batch deletes a single blob (edge case)", async () => {
+      // Upload 1 blob
+      const content = Buffer.from("single blob content").toString("base64");
+      await mcpPost(
+        app,
+        toolCallRequest("blob-create", {
+          containerName,
+          blobName: "single-batch.txt",
+          contentBase64: content,
+        })
+      ).expect(200);
+
+      // Batch delete just 1
+      const res = await mcpPost(
+        app,
+        toolCallRequest("blob-delete-batch", {
+          containerName,
+          blobNames: ["single-batch.txt"],
+        })
+      ).expect(200);
+
+      const data = extractToolJson(res);
+      expect(data.total).toBe(1);
+      expect(data.deleted).toBe(1);
+      expect(data.notFound).toBe(0);
+      expect(data.failed).toBe(0);
+      expect(data.results).toHaveLength(1);
+      expect(data.results[0].outcome).toBe("deleted");
+    });
+  });
+
   it("deletes the container", async () => {
     const res = await mcpPost(
       app,

@@ -19,6 +19,7 @@
 
 import "dotenv/config"; // Load .env file into process.env (local dev only; ignored in production)
 import { createRequire } from "module";
+import https from "node:https";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -49,6 +50,13 @@ import { registerTableResources } from "./resources/table-resources.js";
 import { parseDisabledTools, buildDisabledToolError } from "./utils/disabled-tools.js";
 import { info, warn, error as logError, debug } from "./utils/otel-logger.js";
 import {
+  getTlsConfig,
+  createTlsOptions,
+  watchCertificates,
+  type TlsConfig,
+  type CertificateWatcher,
+} from "./utils/tls.js";
+import {
   recordRequest,
   recordError,
   recordStaleSession,
@@ -71,6 +79,11 @@ export { parseDisabledTools, buildDisabledToolError } from "./utils/disabled-too
 /** Canonical set of disabled tool names (lowercase) parsed once at startup. */
 export const disabledToolNames = parseDisabledTools(process.env.DISABLED_TOOLS);
 
+// -- TLS configuration (read early, before Express is configured) -------------
+// Returns null for plain HTTP mode (no TLS_CERT_FILE / TLS_KEY_FILE set).
+// Throws if only one of the pair is set, or if TLS_MIN_VERSION is invalid.
+const tlsConfig: TlsConfig | null = getTlsConfig();
+
 // -- Express application ------------------------------------------------------
 const app = express();
 
@@ -83,7 +96,13 @@ const app = express();
 // TRUST_PROXY_HOPS controls how many proxy hops to trust. Default 1 is correct
 // for a single reverse proxy (e.g. Azure Container Apps ingress). Set to 2 if
 // there is an additional proxy layer (e.g. Azure Front Door + Container Apps).
-app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS || 1));
+//
+// When TLS is served directly (TLS_CERT_FILE + TLS_KEY_FILE set), the default
+// changes to 0 because there is no proxy in front. This prevents a client from
+// spoofing X-Forwarded-For to choose its own rate-limit key. An explicit
+// TRUST_PROXY_HOPS value always wins regardless of TLS mode.
+const trustProxyDefault = tlsConfig ? 0 : 1;
+app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS || trustProxyDefault));
 
 // CORS -- required for browser-based MCP clients (MCP Inspector, web chat, etc.)
 // Enabled by default (dev-friendly). Set CORS_ENABLED=false in production if the
@@ -509,6 +528,18 @@ app.delete("/mcp", (_req: Request, res: Response) => {
 
 // -- Health check (no auth required) ------------------------------------------
 // Used by Container Apps liveness/readiness probes (see infra/main.bicep).
+//
+// When TLS is enabled, the health check is served over HTTPS. To probe it
+// from inside the Docker image without curl, use:
+//
+//   NODE_EXTRA_CA_CERTS=/path/to/ca.pem \
+//     node -e "fetch('https://localhost:3000/health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"
+//
+// For self-signed certificates, set NODE_TLS_REJECT_UNAUTHORIZED=0 (dev only):
+//
+//   NODE_TLS_REJECT_UNAUTHORIZED=0 \
+//     node -e "fetch('https://localhost:3000/health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"
+//
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "healthy" });
 });
@@ -986,17 +1017,70 @@ app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, r
   req.pipe(bb);
 });
 
-// -- Start HTTP server --------------------------------------------------------
+// -- Start server (HTTP or HTTPS) ---------------------------------------------
 const PORT = parseInt(process.env.PORT || "3000", 10);
 // Record server start metric (once per process)
 recordServerStart();
 
-const httpServer = app.listen(PORT, () => {
+// Certificate watcher handle -- set when TLS is active, cleaned up on shutdown.
+let certWatcher: CertificateWatcher | null = null;
+
+const protocol = tlsConfig ? "https" : "http";
+
+/**
+ * Create the appropriate server based on TLS configuration.
+ *
+ * - When TLS is configured: creates an https.Server with validated cert/key.
+ * - Otherwise: uses app.listen() for plain HTTP (backwards compatible).
+ */
+function startServer(): import("node:http").Server | import("node:https").Server {
+  if (tlsConfig) {
+    // Build and validate TLS options (reads files, checks match + validity)
+    const tlsOptions = createTlsOptions(
+      tlsConfig.certPath,
+      tlsConfig.keyPath,
+      tlsConfig.minVersion,
+    );
+
+    const server = https.createServer(tlsOptions, app);
+    server.listen(PORT, () => {
+      printStartupBanner();
+
+      // Set up certificate hot-reload after server is listening
+      certWatcher = watchCertificates(
+        server,
+        tlsConfig!.certPath,
+        tlsConfig!.keyPath,
+        tlsConfig!.minVersion,
+      );
+    });
+    return server;
+  }
+
+  // Plain HTTP mode (default, backwards compatible)
+  const server = app.listen(PORT, () => {
+    printStartupBanner();
+  });
+  return server;
+}
+
+/** Print the startup banner to stdout. */
+function printStartupBanner(): void {
   console.log(`\n  MCP Azure Storage Server v${APP_VERSION}`);
-  console.log(`   MCP endpoint : http://localhost:${PORT}/mcp`);
-  console.log(`   Upload       : http://localhost:${PORT}/upload`);
-  console.log(`   Health check : http://localhost:${PORT}/health`);
+  console.log(`   MCP endpoint : ${protocol}://localhost:${PORT}/mcp`);
+  console.log(`   Upload       : ${protocol}://localhost:${PORT}/upload`);
+  console.log(`   Health check : ${protocol}://localhost:${PORT}/health`);
   console.log(`   Mode         : Stateless (per-request, multi-replica safe)`);
+  if (tlsConfig) {
+    console.log(`   TLS          : ENABLED (min ${tlsConfig.minVersion})`);
+    console.log(`   TLS cert     : ${tlsConfig.certPath}`);
+    console.log(`   TLS key      : ${tlsConfig.keyPath}`);
+    console.log(`   Trust proxy  : ${process.env.TRUST_PROXY_HOPS || trustProxyDefault} (default ${trustProxyDefault} in TLS mode)`);
+    // Health check hint for Docker images without curl
+    console.log(`   Health probe : NODE_EXTRA_CA_CERTS=/path/to/ca.pem node -e "fetch('https://localhost:${PORT}/health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"`);
+  } else {
+    console.log(`   TLS          : DISABLED (plain HTTP)`);
+  }
   console.log(
     `   API key auth : ${process.env.MCP_API_KEY ? "ENABLED" : "DISABLED (set MCP_API_KEY)"}`
   );
@@ -1011,7 +1095,9 @@ const httpServer = app.listen(PORT, () => {
 
   // Validate DISABLED_TOOLS names against known tools (logs warnings for unknowns)
   validateDisabledToolNames();
-});
+}
+
+const httpServer = startServer();
 
 // -- Graceful shutdown --------------------------------------------------------
 // Container Apps sends SIGTERM during scale-down or redeployment.
@@ -1021,8 +1107,14 @@ const httpServer = app.listen(PORT, () => {
 function shutdown(signal: string) {
   console.log(`\n${signal} received -- shutting down gracefully`);
 
+  // Stop certificate file watcher if active
+  if (certWatcher) {
+    certWatcher.close();
+    certWatcher = null;
+  }
+
   httpServer.close(() => {
-    console.log("HTTP server closed.");
+    console.log(`${tlsConfig ? "HTTPS" : "HTTP"} server closed.`);
     process.exit(0);
   });
 
