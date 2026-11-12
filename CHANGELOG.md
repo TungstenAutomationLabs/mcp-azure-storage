@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Credential redaction in logs** (Veracode CWE-312, flaw 383) -- the structured logger (`src/utils/otel-logger.ts`) now passes every record through `src/utils/log-redaction.ts` before writing it to stdout or the OTel log exporter. Attributes named like credentials (password, secret, token, API key, authorization, cookie, SAS, account key, connection string, private key) are replaced with `[redacted]`, and `AccountKey=`, `SharedAccessSignature=`, `SharedAccessKey=`, SAS `sig=` values and bearer tokens are removed from messages and string attributes. Error messages from the Azure SDK, Node and busboy reach both sinks, and previously did so verbatim.
+- **Startup banner reports state, not raw environment values** (Veracode CWE-312, flaws 377, 378, 379, 380) -- the banner no longer prints the TLS certificate and private key file locations, prints the trust-proxy value Express is using (or `invalid`) instead of the raw `TRUST_PROXY_HOPS` text, and lists disabled tools from the server's tool catalogue with a count of unknown entries instead of echoing `DISABLED_TOOLS`. The banner text is built by `src/utils/startup-banner.ts`.
+
+### Changed
+
+- **Auth debug log attribute** -- the `/mcp` auth middleware's DEBUG record replaces the `xApiKey` and `authorization` attributes (`present`/`missing`) with one attribute, `authHeaders`, listing which credential headers were present (`x-api-key`, `authorization`, both, or `none`). The old names now fall under credential redaction.
+
 ## [1.4.1] -- 2026-11-09
 
 ### Fixed

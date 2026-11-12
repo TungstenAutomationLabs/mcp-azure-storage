@@ -39,3 +39,21 @@ export function buildDisabledToolError(toolName: string) {
     data: { reason: "disabled_tool" as const, toolName },
   };
 }
+
+/**
+ * Split the disabled set into tools the server knows and a count of the rest.
+ *
+ * The known names are taken from the catalogue, not from DISABLED_TOOLS, so
+ * reporting them never echoes the raw environment value.
+ *
+ * @param disabled - Parsed DISABLED_TOOLS set.
+ * @param known - The server's catalogue of tool names.
+ * @returns The disabled catalogue names (catalogue order) and the number of unknown entries.
+ */
+export function splitDisabledTools(
+  disabled: ReadonlySet<string>,
+  known: ReadonlySet<string>,
+): { known: string[]; unknownCount: number } {
+  const knownDisabled = [...known].filter((name) => disabled.has(name));
+  return { known: knownDisabled, unknownCount: disabled.size - knownDisabled.length };
+}

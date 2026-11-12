@@ -165,8 +165,7 @@ describe("apiKeyAuth middleware", () => {
         expect.stringContaining("POST"),
         expect.objectContaining({
           component: "auth",
-          xApiKey: "present",
-          authorization: "missing",
+          authHeaders: "x-api-key",
         }),
       );
 
@@ -177,7 +176,7 @@ describe("apiKeyAuth middleware", () => {
       consoleSpy.mockRestore();
     });
 
-    it("logs only 'present'/'missing' indicators, never actual key values", async () => {
+    it("logs only which credential headers are present, never their values", async () => {
       const secretKey = "super-secret-key-12345";
       const secretBearer = "Bearer top-secret-token-67890";
       process.env.MCP_API_KEY = secretKey;
@@ -197,8 +196,9 @@ describe("apiKeyAuth middleware", () => {
 
       // The attributes should contain only safe indicator values
       const attrs = mockDebug.mock.calls[0][1];
-      expect(attrs.xApiKey).toBe("present");
-      expect(attrs.authorization).toBe("present");
+      expect(attrs.authHeaders).toBe("x-api-key,authorization");
+      expect(attrs).not.toHaveProperty("xApiKey");
+      expect(attrs).not.toHaveProperty("authorization");
     });
 
     it("emits warn() when request has no API key", async () => {

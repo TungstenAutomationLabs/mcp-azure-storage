@@ -14,6 +14,7 @@
 
 import { logs, SeverityNumber } from "@opentelemetry/api-logs";
 import { context, trace } from "@opentelemetry/api";
+import { redactLogAttributes, redactSecretsInText } from "./log-redaction.js";
 
 /** Severity levels supported by the OTel logger. */
 export type OtelLogSeverity = "DEBUG" | "INFO" | "WARN" | "ERROR";
@@ -64,15 +65,20 @@ function emit(
     return;
   }
 
+  // Remove credentials before the record reaches either sink (stdout is
+  // shipped to Log Analytics; the OTel exporter to the telemetry backend).
+  const safeMessage = redactSecretsInText(message);
+  const safeAttributes = redactLogAttributes(attributes);
+
   // Write to stdout (only for messages that pass the severity threshold).
   const timestamp = new Date().toISOString();
   const prefix = `[${timestamp}] ${severity}:`;
   if (severity === "ERROR") {
-    console.error(prefix, message, attributes ?? "");
+    console.error(prefix, safeMessage, safeAttributes ?? "");
   } else if (severity === "WARN") {
-    console.warn(prefix, message, attributes ?? "");
+    console.warn(prefix, safeMessage, safeAttributes ?? "");
   } else {
-    console.log(prefix, message, attributes ?? "");
+    console.log(prefix, safeMessage, safeAttributes ?? "");
   }
 
   // Fetch the logger LAZILY at emit time so we pick up the real
@@ -90,8 +96,8 @@ function emit(
     logger.emit({
       severityNumber: SEVERITY_NUMBER_MAP[severity],
       severityText: severity,
-      body: message,
-      attributes: attributes ?? {},
+      body: safeMessage,
+      attributes: safeAttributes ?? {},
       context: activeContext,
       ...(spanContext
         ? {

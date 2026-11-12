@@ -47,7 +47,8 @@ import { registerBlobResources } from "./resources/blob-resources.js";
 import { registerFileShareResources } from "./resources/fileshare-resources.js";
 import { registerQueueResources } from "./resources/queue-resources.js";
 import { registerTableResources } from "./resources/table-resources.js";
-import { parseDisabledTools, buildDisabledToolError } from "./utils/disabled-tools.js";
+import { parseDisabledTools, buildDisabledToolError, splitDisabledTools } from "./utils/disabled-tools.js";
+import { buildStartupBanner } from "./utils/startup-banner.js";
 import { info, warn, error as logError, debug } from "./utils/otel-logger.js";
 import {
   getTlsConfig,
@@ -1065,34 +1066,29 @@ function startServer(): import("node:http").Server | import("node:https").Server
   return server;
 }
 
-/** Print the startup banner to stdout. */
+/** Print the startup banner to stdout (effective state only, see utils/startup-banner). */
 function printStartupBanner(): void {
-  console.log(`\n  MCP Azure Storage Server v${APP_VERSION}`);
-  console.log(`   MCP endpoint : ${protocol}://localhost:${PORT}/mcp`);
-  console.log(`   Upload       : ${protocol}://localhost:${PORT}/upload`);
-  console.log(`   Health check : ${protocol}://localhost:${PORT}/health`);
-  console.log(`   Mode         : Stateless (per-request, multi-replica safe)`);
-  if (tlsConfig) {
-    console.log(`   TLS          : ENABLED (min ${tlsConfig.minVersion})`);
-    console.log(`   TLS cert     : ${tlsConfig.certPath}`);
-    console.log(`   TLS key      : ${tlsConfig.keyPath}`);
-    console.log(`   Trust proxy  : ${process.env.TRUST_PROXY_HOPS || trustProxyDefault} (default ${trustProxyDefault} in TLS mode)`);
-    // Health check hint for Docker images without curl
-    console.log(`   Health probe : NODE_EXTRA_CA_CERTS=/path/to/ca.pem node -e "fetch('https://localhost:${PORT}/health').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"`);
-  } else {
-    console.log(`   TLS          : DISABLED (plain HTTP)`);
+  const disabled = splitDisabledTools(disabledToolNames, KNOWN_TOOL_NAMES);
+  const lines = buildStartupBanner({
+    version: APP_VERSION,
+    protocol,
+    port: PORT,
+    tlsMinVersion: tlsConfig ? tlsConfig.minVersion : null,
+    trustProxyHops: Number(app.get("trust proxy")),
+    trustProxyDefault,
+    apiKeyAuthEnabled: Boolean(process.env.MCP_API_KEY),
+    corsEnabled: CORS_ENABLED,
+    rateLimitMcpMax: RATE_LIMIT_MCP_MAX,
+    rateLimitUploadMax: RATE_LIMIT_UPLOAD_MAX,
+    rateLimitWindowSeconds: RATE_LIMIT_WINDOW_SECONDS,
+    maxJsonBodyBytes: MAX_JSON_BODY_BYTES,
+    maxUploadBytes: MAX_UPLOAD_BYTES,
+    disabledKnownTools: disabled.known,
+    disabledUnknownCount: disabled.unknownCount,
+  });
+  for (const line of lines) {
+    console.log(line);
   }
-  console.log(
-    `   API key auth : ${process.env.MCP_API_KEY ? "ENABLED" : "DISABLED (set MCP_API_KEY)"}`
-  );
-  console.log(`   CORS         : ${CORS_ENABLED ? "ENABLED" : "DISABLED"}`);
-  console.log(`   Rate limit   : MCP ${RATE_LIMIT_MCP_MAX} / Upload ${RATE_LIMIT_UPLOAD_MAX} per ${RATE_LIMIT_WINDOW_SECONDS}s (API-key-aware)`);
-  console.log(`   JSON limit   : ${(MAX_JSON_BODY_BYTES / (1024 * 1024)).toFixed(0)}mb`);
-  console.log(`   Upload limit : ${(MAX_UPLOAD_BYTES / (1024 * 1024)).toFixed(0)}mb (streaming to Azure)`);
-  if (disabledToolNames.size > 0) {
-    console.log(`   Disabled tools: ${[...disabledToolNames].join(", ")}`);
-  }
-  console.log(""); // trailing newline
 
   // Validate DISABLED_TOOLS names against known tools (logs warnings for unknowns)
   validateDisabledToolNames();

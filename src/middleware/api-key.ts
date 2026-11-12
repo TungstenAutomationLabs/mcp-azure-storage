@@ -45,10 +45,15 @@ export function apiKeyAuth(req: Request, res: Response, next: NextFunction): voi
     (req.headers["x-api-key"] as string | undefined) ||
     extractBearerToken(req.headers.authorization);
 
+  // Names of the credential headers present, never their values. The
+  // attribute name is neutral so the logger's credential redaction keeps it.
+  const authHeaders = [
+    req.headers["x-api-key"] ? "x-api-key" : "",
+    req.headers.authorization ? "authorization" : "",
+  ].filter(Boolean).join(",") || "none";
   debug(`${req.method} ${req.path}`, {
     component: "auth",
-    xApiKey: req.headers["x-api-key"] ? "present" : "missing",
-    authorization: req.headers.authorization ? "present" : "missing",
+    authHeaders,
   });
 
   if (!providedKey) {
