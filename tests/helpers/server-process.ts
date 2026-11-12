@@ -43,6 +43,9 @@ const BASE_ENV: Record<string, string> = {
   AZURE_STORAGE_ACCOUNT_KEY: "dGVzdC1vbmx5LWFjY291bnQta2V5",
   OTEL_SDK_DISABLED: "true",
   NODE_ENV: "test",
+  // Prevent dotenv/config in server.ts from loading the developer's local
+  // .env file, which would override the clean env we construct here.
+  DOTENV_CONFIG_PATH: resolve(REPO_ROOT, ".env.nonexistent"),
 };
 
 /**
