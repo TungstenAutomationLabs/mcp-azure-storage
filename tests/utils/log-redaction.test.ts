@@ -202,8 +202,8 @@ describe("otel-logger boundary end to end", () => {
   it("never writes a nested secret or a stack secret to either sink", () => {
     const err = new Error(`boom sig=${SECRET}`);
     error("Upload error", { error: err.message, stack: `at x AccountKey=${SECRET}`,
-      ...({ nested: { token: SECRET } } as Record<string, never>) });
-    info("tools/call", { ...({ args: [{ apiKey: SECRET }] } as Record<string, never>), tool: "blob-list" });
+      ...({ nested: { token: SECRET } } as unknown as Record<string, never>) });
+    info("tools/call", { ...({ args: [{ apiKey: SECRET }] } as unknown as Record<string, never>), tool: "blob-list" });
     const all = JSON.stringify([errorSpy.mock.calls, logSpy.mock.calls, emitted]);
     expect(all).not.toContain(SECRET);
     expect(all).toContain("blob-list");
@@ -215,7 +215,7 @@ describe("otel-logger boundary end to end", () => {
 
   it("withholds a record whose redaction throws instead of writing it raw", () => {
     const hostile = { get boom(): string { throw new Error(SECRET); } };
-    info(`raw message ${SECRET}`, { ...({ hostile } as Record<string, never>) });
+    info(`raw message ${SECRET}`, { ...({ hostile } as unknown as Record<string, never>) });
     const all = JSON.stringify([logSpy.mock.calls, emitted]);
     expect(all).not.toContain(SECRET);
     expect(all).toContain("redaction failed");

@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Service URLs shown without secrets** -- the plain-HTTP warning for an `AZURE_*_SERVICE_URL` and the `store-info` tool's `endpoints.blobServiceUrl` show scheme, host, port and path only (`src/utils/safe-url.ts`), so a SAS token, credentials or fragment in a configured URL are not printed or returned to MCP clients. URLs without them are unchanged.
 - **Recursive log redaction** -- the redaction boundary now handles nested objects, arrays, errors and stack traces, URL credentials and secret query parameters, cuts circular references, and withholds a record if redaction fails.
 
+### Fixed
+
+- **TLS test certificates on OpenSSL older than 3.4** -- the test helper built its expired and not-yet-valid certificates with `openssl x509 -not_before/-not_after`, which exists only from OpenSSL 3.4; on older versions it silently produced a currently valid certificate (the not-yet-valid test failed) or a zero-day one (the expired test passed by timing). It now uses `openssl ca -selfsign -startdate/-enddate` (OpenSSL 1.1.1 and all 3.x) with dates relative to the current time, CA:FALSE, serverAuth and a SAN, and checks the generated dates, failing loudly instead of returning the wrong certificate. Test-only; no runtime change.
+
 ### Changed
 
 - **Auth debug log attribute** -- the `/mcp` auth middleware's DEBUG record replaces the `xApiKey` and `authorization` attributes (`present`/`missing`) with one attribute, `authHeaders`, listing which credential headers were present (`x-api-key`, `authorization`, both, or `none`). The old names now fall under credential redaction.

@@ -12,7 +12,8 @@
  */
 
 import { execSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { X509Certificate } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -124,67 +125,14 @@ export function generateTestCertificate(options?: {
     stdio: "pipe",
   });
 
-  if (expired) {
-    // Generate an already-expired certificate using OpenSSL 3.4+ -not_before/-not_after
-    const csrPath = join(tmpDir, "csr.pem");
-    execSync(
-      `${openssl} req -new -key "${keyPath}" -out "${csrPath}" -subj "/CN=${cn}"`,
-      { stdio: "pipe" }
-    );
-
-    // First try OpenSSL 3.4+ syntax with -not_before and -not_after
-    try {
-      execSync(
-        `${openssl} x509 -req -in "${csrPath}" -signkey "${keyPath}" -out "${certPath}" ` +
-        `-set_serial 2 -not_before 20200101000000Z -not_after 20200102000000Z`,
-        { stdio: "pipe" }
-      );
-    } catch {
-      // Fallback for older OpenSSL: use -startdate/-enddate
-      try {
-        execSync(
-          `${openssl} x509 -req -in "${csrPath}" -signkey "${keyPath}" -out "${certPath}" ` +
-          `-set_serial 3 -startdate 200101000000Z -enddate 200102000000Z`,
-          { stdio: "pipe" }
-        );
-      } catch {
-        // Last resort: 0-day cert (may appear valid briefly)
-        execSync(
-          `${openssl} x509 -req -in "${csrPath}" -signkey "${keyPath}" -out "${certPath}" ` +
-          `-days 0 -set_serial 1`,
-          { stdio: "pipe" }
-        );
-      }
-    }
-  } else if (notYetValid) {
-    // Generate a certificate that's not yet valid (starts in the future)
-    const csrPath = join(tmpDir, "csr.pem");
-    execSync(
-      `${openssl} req -new -key "${keyPath}" -out "${csrPath}" -subj "/CN=${cn}"`,
-      { stdio: "pipe" }
-    );
-    try {
-      execSync(
-        `${openssl} x509 -req -in "${csrPath}" -signkey "${keyPath}" -out "${certPath}" ` +
-        `-set_serial 4 -not_before 20400101000000Z -not_after 20410101000000Z`,
-        { stdio: "pipe" }
-      );
-    } catch {
-      try {
-        execSync(
-          `${openssl} x509 -req -in "${csrPath}" -signkey "${keyPath}" -out "${certPath}" ` +
-          `-set_serial 5 -startdate 400101000000Z -enddate 410101000000Z`,
-          { stdio: "pipe" }
-        );
-      } catch {
-        // Fall back to a normal cert -- tests should detect this limitation
-        execSync(
-          `${openssl} req -new -x509 -key "${keyPath}" -out "${certPath}" ` +
-          `-days ${days} -subj "/CN=${cn}"`,
-          { stdio: "pipe" }
-        );
-      }
-    }
+  if (expired || notYetValid) {
+    // Dates are relative to now, so these fixtures never age into or out of
+    // validity. Expired: ended a day ago. Not yet valid: starts in a year.
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+    const notBefore = expired ? new Date(now - 2 * DAY) : new Date(now + 365 * DAY);
+    const notAfter = expired ? new Date(now - DAY) : new Date(now + 2 * 365 * DAY);
+    generateDatedCertificate(openssl, tmpDir, keyPath, certPath, cn, notBefore, notAfter);
   } else {
     // Generate a normal self-signed certificate
     execSync(
@@ -198,6 +146,80 @@ export function generateTestCertificate(options?: {
   const keyPem = readFileSync(keyPath, "utf-8");
 
   return { certPath, keyPath, certPem, keyPem, tmpDir };
+}
+
+/** Format a date as an OpenSSL GeneralizedTime string (YYYYMMDDHHMMSSZ). */
+function opensslTime(d: Date): string {
+  return d.toISOString().replace(/[-:T]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+/**
+ * Write a self-signed certificate with an exact validity window.
+ *
+ * Uses `openssl ca -selfsign -startdate -enddate`, which OpenSSL 1.1.1 and
+ * every 3.x support. (`openssl x509 -not_before/-not_after` exists only from
+ * OpenSSL 3.4, and `x509` has no `-startdate`; with an older openssl the
+ * previous helper silently produced a currently valid certificate.)
+ *
+ * The leaf carries CA:FALSE, digitalSignature, serverAuth and a DNS SAN for
+ * `cn`. Afterwards the dates are read back with Node's X509Certificate, and
+ * anything other than the requested window throws, so a fixture can never
+ * quietly be the wrong kind of certificate.
+ */
+function generateDatedCertificate(
+  openssl: string,
+  tmpDir: string,
+  keyPath: string,
+  certPath: string,
+  cn: string,
+  notBefore: Date,
+  notAfter: Date,
+): void {
+  // Forward slashes: OpenSSL config treats backslash as an escape (Windows paths).
+  const dir = tmpDir.replace(/\\/g, "/");
+  const csrPath = join(tmpDir, "csr.pem");
+  const configPath = join(tmpDir, "ca.cnf");
+  writeFileSync(join(tmpDir, "index.txt"), "");
+  writeFileSync(join(tmpDir, "serial"), "01\n");
+  writeFileSync(configPath, [
+    "[ ca ]",
+    "default_ca = test_ca",
+    "[ test_ca ]",
+    `database = ${dir}/index.txt`,
+    `new_certs_dir = ${dir}`,
+    `serial = ${dir}/serial`,
+    "default_md = sha256",
+    "policy = policy_any",
+    "unique_subject = no",
+    "copy_extensions = none",
+    "x509_extensions = leaf_ext",
+    "[ policy_any ]",
+    "commonName = supplied",
+    "[ leaf_ext ]",
+    "basicConstraints = critical, CA:FALSE",
+    "keyUsage = critical, digitalSignature",
+    "extendedKeyUsage = serverAuth",
+    `subjectAltName = DNS:${cn}`,
+    "",
+  ].join("\n"));
+
+  execSync(`${openssl} req -new -key "${keyPath}" -out "${csrPath}" -subj "/CN=${cn}"`, { stdio: "pipe" });
+  execSync(
+    `${openssl} ca -batch -notext -config "${configPath}" -selfsign -keyfile "${keyPath}" ` +
+    `-in "${csrPath}" -out "${certPath}" -startdate ${opensslTime(notBefore)} -enddate ${opensslTime(notAfter)}`,
+    { stdio: "pipe" },
+  );
+
+  const x509 = new X509Certificate(readFileSync(certPath));
+  const from = new Date(x509.validFrom).getTime();
+  const to = new Date(x509.validTo).getTime();
+  // OpenSSL stores whole seconds; allow for the dropped milliseconds.
+  if (Math.abs(from - notBefore.getTime()) > 1000 || Math.abs(to - notAfter.getTime()) > 1000) {
+    throw new Error(
+      `Test certificate has the wrong validity window: got ${x509.validFrom} to ${x509.validTo}, ` +
+      `wanted ${notBefore.toISOString()} to ${notAfter.toISOString()}`,
+    );
+  }
 }
 
 /**

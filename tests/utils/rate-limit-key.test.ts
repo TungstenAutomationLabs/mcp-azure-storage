@@ -57,7 +57,7 @@ describe("getRateLimitKey", () => {
 
   it("counts missing, wrong and malformed credentials against the client address", () => {
     for (const headers of [{}, { "x-api-key": "wrong" }, { authorization: "Bearer wrong" },
-      { authorization: "Basic abc" }, { "x-api-key": "abcé" }]) {
+      { authorization: "Basic abc" }, { "x-api-key": "abcé" }] as Record<string, string>[]) {
       expect(getRateLimitKey(req(headers), CONFIGURED)).toEqual({ key: "ip:203.0.113.7", isApiKey: false });
     }
   });
