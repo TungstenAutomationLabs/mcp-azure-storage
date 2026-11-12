@@ -8,14 +8,14 @@
  *
  * Security properties:
  *  - **Fail-closed** -- if MCP_API_KEY is not configured, ALL requests are rejected (HTTP 503).
- *  - **Constant-time comparison** — uses `crypto.timingSafeEqual` to prevent timing attacks.
+ *  - **Constant-time comparison** -- compares SHA-256 digests with `crypto.timingSafeEqual` (utils/credentials.ts).
  *  - **No query-param auth** — keys are only accepted via headers, not URLs (which leak to logs).
  *
  * @module middleware/api-key
  */
 
 import { Request, Response, NextFunction } from "express";
-import crypto from "crypto";
+import { credentialMatches, presentedCredential } from "../utils/credentials.js";
 import { debug, warn, error } from "../utils/otel-logger.js";
 
 /**
@@ -41,9 +41,7 @@ export function apiKeyAuth(req: Request, res: Response, next: NextFunction): voi
 
   // Extract the client-provided key from headers (two supported formats).
   // Query-param auth is intentionally NOT supported -- URLs appear in logs.
-  const providedKey =
-    (req.headers["x-api-key"] as string | undefined) ||
-    extractBearerToken(req.headers.authorization);
+  const providedKey = presentedCredential(req.headers);
 
   // Names of the credential headers present, never their values. The
   // attribute name is neutral so the logger's credential redaction keeps it.
@@ -70,7 +68,7 @@ export function apiKeyAuth(req: Request, res: Response, next: NextFunction): voi
 
   // Constant-time comparison prevents an attacker from measuring response
   // times to determine how many characters of the key are correct.
-  if (!timingSafeEqual(apiKey, providedKey)) {
+  if (!credentialMatches(apiKey, providedKey)) {
     warn("Rejected -- invalid API key", { component: "auth" });
     res.status(403).json({
       jsonrpc: "2.0",
@@ -85,34 +83,3 @@ export function apiKeyAuth(req: Request, res: Response, next: NextFunction): voi
   next();
 }
 
-/**
- * Extract the token from an `Authorization: Bearer <token>` header.
- *
- * @param authHeader - The raw Authorization header value.
- * @returns The token string, or undefined if the header is missing/malformed.
- */
-function extractBearerToken(authHeader: string | undefined): string | undefined {
-  if (!authHeader) return undefined;
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : undefined;
-}
-
-/**
- * Constant-time string comparison using `crypto.timingSafeEqual`.
- *
- * When lengths differ, we still perform a comparison (against self) to avoid
- * leaking length information via timing. The function always returns false
- * for mismatched lengths.
- *
- * @param a - Expected value (server-side API key).
- * @param b - Provided value (client-submitted key).
- * @returns true if the strings are identical.
- */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    // Compare `a` against itself to burn the same CPU time, then return false
-    crypto.timingSafeEqual(Buffer.from(a), Buffer.from(a));
-    return false;
-  }
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}

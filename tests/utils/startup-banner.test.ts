@@ -5,7 +5,7 @@
  * TRUST_PROXY_HOPS) to stdout.
  */
 
-import { buildStartupBanner, type StartupBannerOptions } from "../../src/utils/startup-banner.js";
+import { buildStartupBanner, toSafeInteger, type StartupBannerOptions } from "../../src/utils/startup-banner.js";
 import { parseDisabledTools, splitDisabledTools } from "../../src/utils/disabled-tools.js";
 
 const base: StartupBannerOptions = {
@@ -15,8 +15,8 @@ const base: StartupBannerOptions = {
   tlsMinVersion: "TLSv1.3",
   trustProxyHops: 0,
   trustProxyDefault: 0,
-  apiKeyAuthEnabled: true,
-  corsEnabled: false,
+  apiKeyAuth: "ENABLED",
+  cors: "DISABLED",
   rateLimitMcpMax: 600,
   rateLimitUploadMax: 600,
   rateLimitWindowSeconds: 60,
@@ -58,7 +58,7 @@ describe("buildStartupBanner", () => {
   });
 
   it("reports an unusable trust-proxy value as invalid, not as the raw text", () => {
-    const text = buildStartupBanner({ ...base, trustProxyHops: Number("abc") }).join("\n");
+    const text = buildStartupBanner({ ...base, trustProxyHops: toSafeInteger(Number("abc")) }).join("\n");
     expect(text).toContain("Trust proxy  : invalid");
     expect(text).not.toContain("abc");
   });
@@ -82,5 +82,32 @@ describe("buildStartupBanner", () => {
   it("prints the unknown count alone when no known tool is disabled", () => {
     const text = buildStartupBanner({ ...base, disabledUnknownCount: 2 }).join("\n");
     expect(text).toContain("Disabled tools: (+2 unknown, see warnings)");
+  });
+});
+
+describe("toSafeInteger", () => {
+  it("accepts safe integers and digit strings only", () => {
+    expect(toSafeInteger(3)).toBe(3);
+    expect(toSafeInteger(" 12 ")).toBe(12);
+    expect(toSafeInteger(1.5)).toBeNull();
+    expect(toSafeInteger(Number.NaN)).toBeNull();
+    expect(toSafeInteger("1e3")).toBeNull();
+    expect(toSafeInteger("AccountKey=abc")).toBeNull();
+    expect(toSafeInteger(undefined)).toBeNull();
+    expect(toSafeInteger(true)).toBeNull();
+  });
+});
+
+describe("startup banner contract", () => {
+  it("prints invalid, not the value, for a non-integer limit that slipped through", () => {
+    const text = buildStartupBanner({
+      ...base,
+      // A caller bypassing the types must not get free text into the banner.
+      rateLimitMcpMax: "sk-synthetic-limit" as unknown as number,
+      maxUploadBytes: Number.NaN,
+    }).join("\n");
+    expect(text).toContain("Rate limit   : MCP invalid / Upload 600 per 60s");
+    expect(text).toContain("Upload limit : invalidmb");
+    expect(text).not.toContain("sk-synthetic-limit");
   });
 });

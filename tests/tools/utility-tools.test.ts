@@ -534,6 +534,25 @@ describe("utility-tools", () => {
           expect(data.endpoints.blobServiceUrl).toBe("http://127.0.0.1:10000/devstoreaccount1");
         });
   
+        it("endpoints.blobServiceUrl never returns a SAS token or credentials from the override", async () => {
+          process.env.AZURE_BLOB_SERVICE_URL = "https://u:synthPw7@acct.blob.core.windows.net/?sv=1&sig=synthSig7";
+          _resetConfigForTesting();
+
+          const app = createUtilTestApp();
+          const res = await mcpPost(
+            app,
+            toolCallRequest("store-info", {})
+          ).expect(200);
+
+          const text = JSON.stringify(res.body);
+          expect(text).not.toContain("synthSig7");
+          expect(text).not.toContain("synthPw7");
+          const data = extractToolJson(res);
+          expect(data.endpoints.blobServiceUrl).toBe("https://acct.blob.core.windows.net");
+          delete process.env.AZURE_BLOB_SERVICE_URL;
+          _resetConfigForTesting();
+        });
+
         it("endpoints.blobServiceUrl uses default Azure URL when no override", async () => {
           delete process.env.AZURE_BLOB_SERVICE_URL;
           _resetConfigForTesting();

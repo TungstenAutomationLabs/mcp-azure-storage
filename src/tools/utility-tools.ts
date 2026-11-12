@@ -35,6 +35,7 @@ import {
   getBlobServiceBaseUrl,
 } from "../config.js";
 import { parseDisabledTools } from "../utils/disabled-tools.js";
+import { describeEndpoint } from "../utils/safe-url.js";
 
 /**
  * Register all 8 utility tools on the given MCP server.
@@ -353,7 +354,9 @@ export function registerUtilityTools(server: McpServer): void {
       }
 
       // ── Blob service URL ──
-      const blobServiceUrl = getBlobServiceBaseUrl();
+      // Shown without query, fragment or user-info: a SAS token or
+      // credentials in AZURE_BLOB_SERVICE_URL must not reach MCP clients.
+      const blobServiceUrl = describeEndpoint(getBlobServiceBaseUrl());
 
       return formatResponse(
         {

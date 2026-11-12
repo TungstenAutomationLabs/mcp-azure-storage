@@ -80,16 +80,18 @@ export function getTlsConfig(): TlsConfig | null {
   // Validate TLS_MIN_VERSION
   const rawMinVersion = process.env.TLS_MIN_VERSION || "TLSv1.3";
   if (rawMinVersion !== "TLSv1.2" && rawMinVersion !== "TLSv1.3") {
+    // The rejected value is not echoed: it is environment text, and startup
+    // errors reach stderr and the container logs.
     throw new Error(
-      `Invalid TLS_MIN_VERSION: "${rawMinVersion}". ` +
-      `Accepted values are "TLSv1.2" or "TLSv1.3".`
+      'Invalid TLS_MIN_VERSION. Accepted values are "TLSv1.2" or "TLSv1.3".'
     );
   }
 
   return {
     certPath: certPath!,
     keyPath: keyPath!,
-    minVersion: rawMinVersion,
+    // The allowlisted constant, not the environment string itself.
+    minVersion: rawMinVersion === "TLSv1.2" ? "TLSv1.2" : "TLSv1.3",
   };
 }
 
@@ -260,16 +262,14 @@ export function watchCertificates(
 
       server.setSecureContext({ cert, key, minVersion });
 
-      info("TLS certificates reloaded successfully", {
-        certFile: certPath,
-        keyFile: keyPath,
-      });
+      // File locations come from TLS_CERT_FILE / TLS_KEY_FILE and are not
+      // logged (stdout is shipped to Log Analytics).
+      info("TLS certificates reloaded successfully", { component: "tls" });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       warn("TLS certificate reload failed; keeping existing certificate", {
+        component: "tls",
         error: msg,
-        certFile: certPath,
-        keyFile: keyPath,
       });
     }
   };
@@ -296,7 +296,9 @@ export function watchCertificates(
       watchers.push(watcher);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      warn(`Failed to set up certificate file watcher for directory "${dir}"`, {
+      warn("Failed to set up certificate file watcher", {
+        component: "tls",
+        directory: dir === certDir ? "TLS_CERT_FILE directory" : "TLS_KEY_FILE directory",
         error: msg,
       });
     }
@@ -304,7 +306,8 @@ export function watchCertificates(
 
   if (watchers.length > 0) {
     info("Certificate file watcher active", {
-      directories: [...dirsToWatch].join(", "),
+      component: "tls",
+      watchedDirectories: watchers.length,
     });
   }
 

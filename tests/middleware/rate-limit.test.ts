@@ -13,40 +13,11 @@ import crypto from "crypto";
 import supertest from "supertest";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+// The identity logic under test is the server's own (src/utils/rate-limit-key.ts),
+// not a copy, so these tests cannot drift from the real behaviour.
 
-/** Constant-time string comparison (mirrors server.ts helper). */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    crypto.timingSafeEqual(Buffer.from(a), Buffer.from(a));
-    return false;
-  }
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-
-/** Extract Bearer token from Authorization header. */
-function extractBearerToken(authHeader: string | undefined): string | undefined {
-  if (!authHeader) return undefined;
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : undefined;
-}
-
-/**
- * Derive a rate-limit identity key — same logic as server.ts getRateLimitKey.
- */
-function getRateLimitKey(req: Request, configuredApiKey: string | undefined): { key: string; isApiKey: boolean } {
-  const providedKey =
-    (req.headers["x-api-key"] as string | undefined) ||
-    extractBearerToken(req.headers.authorization);
-
-  if (providedKey) {
-    if (!configuredApiKey || timingSafeEqual(configuredApiKey, providedKey)) {
-      const hash = crypto.createHash("sha256").update(providedKey).digest("hex");
-      return { key: `apikey:${hash}`, isApiKey: true };
-    }
-  }
-
-  return { key: `ip:${req.ip || "unknown"}`, isApiKey: false };
-}
+import { AUTHENTICATED_CLIENT_BUCKET, getRateLimitKey } from "../../src/utils/rate-limit-key.js";
+import { credentialMatches, presentedCredential } from "../../src/utils/credentials.js";
 
 /**
  * Build a test Express app with separate MCP and upload rate limiters,
@@ -71,14 +42,12 @@ function createRateLimitApp(opts: {
       // Auth disabled — pass through
       return next();
     }
-    const provided =
-      (req.headers["x-api-key"] as string | undefined) ||
-      extractBearerToken(req.headers.authorization);
+    const provided = presentedCredential(req.headers);
     if (!provided) {
       res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "Missing API key" } });
       return;
     }
-    if (!timingSafeEqual(configuredApiKey, provided)) {
+    if (!credentialMatches(configuredApiKey, provided)) {
       // Wrong key — still pass through so rate limiter sees the IP-based key
       // (mirrors real server: apiKeyAuth rejects, but for rate-limit testing
       // we want to see the IP-based limiting behaviour, so we let it through)
@@ -124,8 +93,8 @@ function createRateLimitApp(opts: {
     },
   });
 
-  // Mount /mcp: auth → rate limit → handler
-  app.post("/mcp", authMiddleware, mcpLimiter, (req: Request, res: Response) => {
+  // Mount /mcp: rate limit → auth → handler (the server's order)
+  app.post("/mcp", mcpLimiter, authMiddleware, (req: Request, res: Response) => {
     res.status(200).json({
       jsonrpc: "2.0",
       id: req.body?.id ?? 1,
@@ -133,8 +102,8 @@ function createRateLimitApp(opts: {
     });
   });
 
-  // Mount /upload: auth → rate limit → handler
-  app.post("/upload", authMiddleware, uploadLimiter, (req: Request, res: Response) => {
+  // Mount /upload: rate limit → auth → handler (the server's order)
+  app.post("/upload", uploadLimiter, authMiddleware, (req: Request, res: Response) => {
     res.status(200).json({ success: true });
   });
 
@@ -202,9 +171,9 @@ describe("Rate limiting", () => {
     });
   });
 
-  describe("API-key-aware separate budgets", () => {
-    it("two different valid API keys get independent budgets", async () => {
-      // When MCP_API_KEY is not set, any presented key gets its own hash-based budget
+  describe("keys presented while auth is disabled", () => {
+    it("share the client address budget (rotating keys opens no new budget)", async () => {
+      // MCP_API_KEY unset: no key is authenticated, so every key counts per IP
       const app = createRateLimitApp({ windowSeconds: 5, mcpMax: 2, uploadMax: 1 });
 
       const keyA = "valid-key-alpha";
@@ -214,13 +183,9 @@ describe("Rate limiting", () => {
       await supertest(app).post("/mcp").set("X-API-Key", keyA).send({ jsonrpc: "2.0", id: 1, method: "ping", params: {} }).expect(200);
       await supertest(app).post("/mcp").set("X-API-Key", keyA).send({ jsonrpc: "2.0", id: 2, method: "ping", params: {} }).expect(200);
 
-      // keyB: 2 requests pass (separate budget)
-      await supertest(app).post("/mcp").set("X-API-Key", keyB).send({ jsonrpc: "2.0", id: 3, method: "ping", params: {} }).expect(200);
-      await supertest(app).post("/mcp").set("X-API-Key", keyB).send({ jsonrpc: "2.0", id: 4, method: "ping", params: {} }).expect(200);
-
-      // Both hit 429 on their 3rd request
-      await supertest(app).post("/mcp").set("X-API-Key", keyA).send({ jsonrpc: "2.0", id: 5, method: "ping", params: {} }).expect(429);
-      await supertest(app).post("/mcp").set("X-API-Key", keyB).send({ jsonrpc: "2.0", id: 6, method: "ping", params: {} }).expect(429);
+      // keyB: same address, budget already spent
+      await supertest(app).post("/mcp").set("X-API-Key", keyB).send({ jsonrpc: "2.0", id: 3, method: "ping", params: {} }).expect(429);
+      await supertest(app).post("/mcp").set("X-API-Key", keyA).send({ jsonrpc: "2.0", id: 4, method: "ping", params: {} }).expect(429);
     });
   });
 
@@ -441,17 +406,16 @@ describe("Rate limiting", () => {
       return { headers, ip } as unknown as Request;
     }
 
-    it("returns apikey hash for valid key when MCP_API_KEY is configured", () => {
+    it("returns the authenticated bucket for the configured key, with no key material", () => {
       const configuredKey = "server-key-123";
       const result = getRateLimitKey(
         makeReq({ "x-api-key": "server-key-123" }),
         configuredKey
       );
       expect(result.isApiKey).toBe(true);
-      expect(result.key).toMatch(/^apikey:[a-f0-9]{64}$/);
-      // Verify it's a SHA-256 hash of the key
-      const expectedHash = crypto.createHash("sha256").update("server-key-123").digest("hex");
-      expect(result.key).toBe(`apikey:${expectedHash}`);
+      expect(result.key).toBe(AUTHENTICATED_CLIENT_BUCKET);
+      const hash = crypto.createHash("sha256").update("server-key-123").digest("hex");
+      expect(result.key).not.toContain(hash);
     });
 
     it("returns IP key for wrong API key", () => {
@@ -476,23 +440,22 @@ describe("Rate limiting", () => {
         "my-key-456"
       );
       expect(result.isApiKey).toBe(true);
-      const expectedHash = crypto.createHash("sha256").update("my-key-456").digest("hex");
-      expect(result.key).toBe(`apikey:${expectedHash}`);
+      expect(result.key).toBe(AUTHENTICATED_CLIENT_BUCKET);
     });
 
-    it("returns apikey hash when MCP_API_KEY is not configured (auth disabled)", () => {
+    it("returns the IP key when MCP_API_KEY is not configured (auth disabled)", () => {
       const result = getRateLimitKey(
         makeReq({ "x-api-key": "any-key" }),
         undefined // no configured key
       );
-      expect(result.isApiKey).toBe(true);
-      expect(result.key).toMatch(/^apikey:/);
+      expect(result.isApiKey).toBe(false);
+      expect(result.key).toBe("ip:127.0.0.1");
     });
 
-    it("different keys produce different hashes", () => {
+    it("different unauthenticated keys share one budget", () => {
       const r1 = getRateLimitKey(makeReq({ "x-api-key": "key-a" }), undefined);
       const r2 = getRateLimitKey(makeReq({ "x-api-key": "key-b" }), undefined);
-      expect(r1.key).not.toBe(r2.key);
+      expect(r1.key).toBe(r2.key);
     });
   });
 });

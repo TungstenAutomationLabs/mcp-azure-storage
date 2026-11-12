@@ -10,6 +10,7 @@ import {
   isSensitiveAttributeName,
   redactLogAttributes,
   redactSecretsInText,
+  redactLogMessage,
 } from "../../src/utils/log-redaction.js";
 import { info, debug, warn, error } from "../../src/utils/otel-logger.js";
 
@@ -128,5 +129,95 @@ describe("auth middleware debug attribute survives redaction", () => {
   it("keeps authHeaders, the neutral name api-key.ts logs", () => {
     expect(redactLogAttributes({ component: "auth", authHeaders: "x-api-key,authorization" }))
       .toEqual({ component: "auth", authHeaders: "x-api-key,authorization" });
+  });
+});
+
+describe("log-redaction boundary: nested values, errors and failures", () => {
+  const SECRET = "synthetic-secret-value-9f8e7d";
+
+  it("redacts credential-named keys at any depth and inside arrays", () => {
+    const out = redactLogAttributes({
+      request: { headers: { authorization: `Bearer ${SECRET}`, "x-api-key": SECRET, accept: "json" } },
+      items: [{ password: SECRET }, `AccountKey=${SECRET}`, 3],
+    } as Record<string, unknown>);
+    const text = JSON.stringify(out);
+    expect(text).not.toContain(SECRET);
+    expect(text).toContain("json");
+    expect(typeof out!.request).toBe("string");
+  });
+
+  it("redacts error messages and stack traces", () => {
+    const err = new Error(`Request failed: https://a.blob.core.windows.net/c/b?sv=1&sig=${SECRET}`);
+    err.stack = `Error: AccountKey=${SECRET}\n    at f (file.ts:1:1)`;
+    const out = redactLogAttributes({ error: err } as Record<string, unknown>);
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+    expect(String(out!.error)).toContain("at f (file.ts:1:1)");
+    expect(redactLogMessage(err)).not.toContain(SECRET);
+  });
+
+  it("removes credentials in URLs and secret query parameters", () => {
+    const out = redactSecretsInText(
+      `https://user:${SECRET}@host/x?token=${SECRET}&api_key=${SECRET}&client_secret=${SECRET}&ok=1 Basic ${SECRET}`);
+    expect(out).not.toContain(SECRET);
+    expect(out).toContain("https://[redacted]@host/x");
+    expect(out).toContain("&ok=1");
+  });
+
+  it("cuts circular references and deep nesting without throwing", () => {
+    const a: Record<string, unknown> = { name: "a" };
+    a.self = a;
+    let deep: Record<string, unknown> = { password: SECRET };
+    for (let i = 0; i < 20; i++) deep = { next: deep };
+    const out = redactLogAttributes({ a, deep } as Record<string, unknown>);
+    expect(String(out!.a)).toContain("[circular]");
+    expect(String(out!.deep)).toContain("[truncated]");
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+  });
+
+  it("reduces an MCP-style payload to a redacted string attribute", () => {
+    const payload = { jsonrpc: "2.0", method: "tools/call", params: { arguments: { sasUrl: `https://x/y?sig=${SECRET}`, accountKey: SECRET } } };
+    const out = redactLogAttributes({ payload } as Record<string, unknown>);
+    expect(out!.payload).toContain("tools/call");
+    expect(out!.payload).not.toContain(SECRET);
+  });
+});
+
+describe("otel-logger boundary end to end", () => {
+  const SECRET = "synthetic-secret-value-1a2b3c";
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let emitted: unknown[];
+  let getLoggerSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    emitted = [];
+    getLoggerSpy = vi.spyOn(logs, "getLogger").mockReturnValue({
+      emit: (record: unknown) => { emitted.push(record); },
+    } as unknown as ReturnType<typeof logs.getLogger>);
+  });
+  afterEach(() => { logSpy.mockRestore(); errorSpy.mockRestore(); getLoggerSpy.mockRestore(); });
+
+  it("never writes a nested secret or a stack secret to either sink", () => {
+    const err = new Error(`boom sig=${SECRET}`);
+    error("Upload error", { error: err.message, stack: `at x AccountKey=${SECRET}`,
+      ...({ nested: { token: SECRET } } as Record<string, never>) });
+    info("tools/call", { ...({ args: [{ apiKey: SECRET }] } as Record<string, never>), tool: "blob-list" });
+    const all = JSON.stringify([errorSpy.mock.calls, logSpy.mock.calls, emitted]);
+    expect(all).not.toContain(SECRET);
+    expect(all).toContain("blob-list");
+    expect(all).toContain("Upload error");
+    for (const record of emitted as Array<{ attributes: Record<string, unknown> }>) {
+      for (const v of Object.values(record.attributes)) expect(["string", "number", "boolean"]).toContain(typeof v);
+    }
+  });
+
+  it("withholds a record whose redaction throws instead of writing it raw", () => {
+    const hostile = { get boom(): string { throw new Error(SECRET); } };
+    info(`raw message ${SECRET}`, { ...({ hostile } as Record<string, never>) });
+    const all = JSON.stringify([logSpy.mock.calls, emitted]);
+    expect(all).not.toContain(SECRET);
+    expect(all).toContain("redaction failed");
   });
 });

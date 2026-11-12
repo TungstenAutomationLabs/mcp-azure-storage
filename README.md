@@ -1284,7 +1284,8 @@ The deployment includes three mechanisms to ensure reliable connections:
 - **SSRF protection** -- `blob-upload-from-url` validates URLs before fetching: blocks loopback, link-local (Azure IMDS 169.254.169.254), private RFC 1918 ranges, non-HTTP schemes, and open redirects (`redirect: "error"`)
 - **Streaming uploads** -- `POST /upload` streams directly to Azure Blob Storage via busboy + `uploadStream` (no temp files, no full-file buffering). Capped at `MAX_UPLOAD_BYTES` (default 5 GiB); oversized files return 413 with `code: "too_large"`. Rate-limited by the same per-identity limiter as `/mcp`
 - **Helmet** -- sets security headers (HSTS, X-Content-Type-Options, X-Frame-Options, etc.)
-- **Rate limiting** -- per-IP request throttling on both `/mcp` and `/upload` endpoints
+- **Rate limiting** -- request throttling on both `/mcp` and `/upload`, applied before authentication so failed attempts are counted: requests with the configured API key share the authenticated budget; requests with no key, a wrong key, or any key while `MCP_API_KEY` is unset are counted per client address (IPv6 grouped by /56, `X-Forwarded-For` believed only for `TRUST_PROXY_HOPS` hops), so rotating keys does not open new budgets
+- **Log redaction** -- every log record passes a redaction boundary before stdout and OpenTelemetry: credential-named fields (at any depth), Azure account keys and connection-string secrets, SAS signatures and other secret query parameters, URL credentials and bearer tokens are replaced with `[redacted]`. The startup banner prints only state words, allowlisted constants, integers and tool names, never paths, URLs or environment text
 - **Session TTL** -- idle sessions are automatically evicted after 30 minutes
 - **Non-root Docker** -- container runs as unprivileged `appuser`
 - **User-assigned managed identity** -- ACR pull + Storage RBAC with no circular dependency

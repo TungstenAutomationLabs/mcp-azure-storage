@@ -45,6 +45,7 @@ import {
   SASProtocol,
 } from "@azure/storage-blob";
 import type { TokenCredential } from "@azure/identity";
+import { describeEndpoint } from "./utils/safe-url.js";
 
 /** Allowed SAS protocol values (normalised to lowercase). */
 export type SasProtocolValue = "https" | "https,http";
@@ -159,7 +160,7 @@ export function getStorageConfig(): StorageConfig {
         url.startsWith("http://[::1]");
       if (!isLocalhost) {
         console.warn(
-          `[SECURITY WARNING] ${name} service URL uses plain HTTP (${url}). ` +
+          `[SECURITY WARNING] ${name} service URL uses plain HTTP (${describeEndpoint(url)}). ` +
           `Data in transit will NOT be encrypted. Use HTTPS unless targeting a local emulator.`
         );
       }

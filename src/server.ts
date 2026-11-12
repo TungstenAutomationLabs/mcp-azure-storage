@@ -26,7 +26,6 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import Busboy from "busboy";
 import { PassThrough } from "stream";
-import crypto from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -48,7 +47,8 @@ import { registerFileShareResources } from "./resources/fileshare-resources.js";
 import { registerQueueResources } from "./resources/queue-resources.js";
 import { registerTableResources } from "./resources/table-resources.js";
 import { parseDisabledTools, buildDisabledToolError, splitDisabledTools } from "./utils/disabled-tools.js";
-import { buildStartupBanner } from "./utils/startup-banner.js";
+import { buildStartupBanner, toSafeInteger } from "./utils/startup-banner.js";
+import { getRateLimitKey } from "./utils/rate-limit-key.js";
 import { info, warn, error as logError, debug } from "./utils/otel-logger.js";
 import {
   getTlsConfig,
@@ -151,52 +151,9 @@ const RATE_LIMIT_UPLOAD_MAX = process.env.RATE_LIMIT_UPLOAD_MAX
   ? parseInt(process.env.RATE_LIMIT_UPLOAD_MAX, 10)
   : (process.env.RATE_LIMIT_MAX_REQUESTS ? legacyMax : 600);
 
-/**
- * Derive a rate-limit identity key from the request.
- *
- * - If the request carries an API key (X-API-Key or Bearer) and it matches
- *   the configured MCP_API_KEY, key on SHA-256(apiKey) so each legitimate
- *   key holder gets their own budget.
- * - If MCP_API_KEY is not configured (auth disabled), any presented API key
- *   is hashed so different keys still get separate budgets.
- * - Otherwise, key on the resolved client IP (respects trust proxy hops).
- *
- * @returns `{ key, isApiKey }` -- key is the limiter identity string,
- *          isApiKey is true when the key derives from a valid API key.
- */
-export function getRateLimitKey(req: Request): { key: string; isApiKey: boolean } {
-  const providedKey =
-    (req.headers["x-api-key"] as string | undefined) ||
-    extractBearerTokenForRateLimit(req.headers.authorization);
-
-  if (providedKey) {
-    const configuredKey = process.env.MCP_API_KEY;
-    // If auth is disabled (no MCP_API_KEY) or the key matches, key on the hash
-    if (!configuredKey || timingSafeEqualForRateLimit(configuredKey, providedKey)) {
-      const hash = crypto.createHash("sha256").update(providedKey).digest("hex");
-      return { key: `apikey:${hash}`, isApiKey: true };
-    }
-  }
-
-  // Fallback: key on client IP
-  return { key: `ip:${req.ip || "unknown"}`, isApiKey: false };
-}
-
-/** Extract Bearer token from Authorization header (rate-limit helper). */
-function extractBearerTokenForRateLimit(authHeader: string | undefined): string | undefined {
-  if (!authHeader) return undefined;
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : undefined;
-}
-
-/** Constant-time string comparison (rate-limit helper, mirrors api-key.ts). */
-function timingSafeEqualForRateLimit(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    crypto.timingSafeEqual(Buffer.from(a), Buffer.from(a));
-    return false;
-  }
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
+// Rate-limit identity: see utils/rate-limit-key.ts. Re-exported for
+// backward compatibility with consumers that imported it from server.ts.
+export { getRateLimitKey } from "./utils/rate-limit-key.js";
 
 // -- MCP rate limiter (/mcp JSON-RPC) -----------------------------------------
 const mcpLimiter = rateLimit({
@@ -403,19 +360,25 @@ function validateDisabledToolNames(): void {
   if (_disabledToolsValidated || disabledToolNames.size === 0) return;
   _disabledToolsValidated = true;
 
-  for (const disabled of disabledToolNames) {
-    if (!KNOWN_TOOL_NAMES.has(disabled)) {
-      warn(`DISABLED_TOOLS contains unknown tool name: '${disabled}'`, { tool: disabled });
-    }
+  // Report how many entries match no tool, never the entries themselves:
+  // DISABLED_TOOLS is free text from the environment, and a value pasted
+  // into the wrong variable must not be copied into the logs.
+  const { unknownCount } = splitDisabledTools(disabledToolNames, KNOWN_TOOL_NAMES);
+  if (unknownCount > 0) {
+    warn("DISABLED_TOOLS contains entries that match no tool; check them against the tool list", {
+      unknownCount,
+    });
   }
 }
 
-// -- API key auth on /mcp -----------------------------------------------------
-// All /mcp routes require a valid API key. See middleware/api-key.ts.
-// Auth runs BEFORE rate limiting so that valid keys are recognised for
-// per-key rate-limit keying (SHA-256 of API key instead of IP).
-app.use("/mcp", apiKeyAuth);
+// -- Rate limiting and API key auth on /mcp -----------------------------------
+// The limiter runs BEFORE auth so that every request is counted, including
+// ones with a missing or wrong key: those are counted per client address,
+// which throttles key guessing. A request with the configured key is counted
+// in the authenticated bucket (utils/rate-limit-key.ts). Then all /mcp routes
+// require a valid API key (middleware/api-key.ts).
 app.use("/mcp", mcpLimiter);
+app.use("/mcp", apiKeyAuth);
 
 // =============================================================================
 // POST /mcp -- Main MCP request handler (fully stateless)
@@ -668,7 +631,7 @@ function uploadSizeGuard(req: Request, res: Response, next: NextFunction): void 
  * validation happens after busboy's "close" event when all parts have been
  * received.
  */
-app.post("/upload", apiKeyAuth, uploadLimiter, uploadSizeGuard, (req: Request, res: Response) => {
+app.post("/upload", uploadLimiter, apiKeyAuth, uploadSizeGuard, (req: Request, res: Response) => {
   // Guard: Content-Type must be multipart/form-data
   const ct = req.headers["content-type"] || "";
   if (!ct.includes("multipart/form-data")) {
@@ -1074,10 +1037,10 @@ function printStartupBanner(): void {
     protocol,
     port: PORT,
     tlsMinVersion: tlsConfig ? tlsConfig.minVersion : null,
-    trustProxyHops: Number(app.get("trust proxy")),
+    trustProxyHops: toSafeInteger(app.get("trust proxy")),
     trustProxyDefault,
-    apiKeyAuthEnabled: Boolean(process.env.MCP_API_KEY),
-    corsEnabled: CORS_ENABLED,
+    apiKeyAuth: process.env.MCP_API_KEY ? "ENABLED" : "DISABLED",
+    cors: CORS_ENABLED ? "ENABLED" : "DISABLED",
     rateLimitMcpMax: RATE_LIMIT_MCP_MAX,
     rateLimitUploadMax: RATE_LIMIT_UPLOAD_MAX,
     rateLimitWindowSeconds: RATE_LIMIT_WINDOW_SECONDS,

@@ -14,7 +14,10 @@
 
 import { logs, SeverityNumber } from "@opentelemetry/api-logs";
 import { context, trace } from "@opentelemetry/api";
-import { redactLogAttributes, redactSecretsInText } from "./log-redaction.js";
+import { redactLogAttributes, redactLogMessage, type LogAttributeValue } from "./log-redaction.js";
+
+/** Message written in place of a record whose redaction failed. */
+const REDACTION_FAILED = "[log record withheld: redaction failed]";
 
 /** Severity levels supported by the OTel logger. */
 export type OtelLogSeverity = "DEBUG" | "INFO" | "WARN" | "ERROR";
@@ -67,8 +70,16 @@ function emit(
 
   // Remove credentials before the record reaches either sink (stdout is
   // shipped to Log Analytics; the OTel exporter to the telemetry backend).
-  const safeMessage = redactSecretsInText(message);
-  const safeAttributes = redactLogAttributes(attributes);
+  // If redaction itself fails, withhold the record rather than write it raw.
+  let safeMessage: string;
+  let safeAttributes: Record<string, LogAttributeValue> | undefined;
+  try {
+    safeMessage = redactLogMessage(message);
+    safeAttributes = redactLogAttributes(attributes);
+  } catch {
+    safeMessage = REDACTION_FAILED;
+    safeAttributes = undefined;
+  }
 
   // Write to stdout (only for messages that pass the severity threshold).
   const timestamp = new Date().toISOString();
